@@ -1,0 +1,63 @@
+#!/bin/bash
+
+# Run in WORKDIR
+#####################
+
+inputfile=$1
+CPU=$2 
+BOWTIEINDEX=$(readlink -f "$3")/GRCm38
+
+#####################
+
+inputfile_name=${inputfile%%.*}
+input_trim=${inputfile_name}.trim.fastq.gz
+
+# QC raw reads
+
+mkdir fastqc_before trim
+if test -s "fastqc_before/${inputfile_name}_fastqc.html"; then
+        echo "File fastqc_before/${inputfile_name}_fastqc.html already exist - SKIP QC"
+else
+	fastqc $inputfile -t $CPU -o fastqc_before
+fi
+
+### Trim first NNN ###
+if test -s "trim/${input_trim}"; then
+	echo "File trim/${input_trim} already exist - SKIP TRIMMING"
+else
+	fastp -w $CPU -f 3 -i $inputfile  -o trim/${input_trim} && rm $inputfile
+fi
+
+# QC trim reads
+
+mkdir fastqc_after
+
+if test -s "fastqc_after/${inputfile_name}.trim_fastqc.html"; then
+        echo "File fastqc_after/${inputfile_name}.trim_fastqc.html already exist - SKIP QC"
+else
+        fastqc trim/${input_trim} -t $CPU -o fastqc_after
+fi
+
+### ALIGNMENT
+
+mkdir alignments
+
+	if test -s "alignments/${inputfile}.bam"; then
+		echo "${inputfile} already aligned to the genome - SKIP ALIGNING"
+	else
+		bowtie --threads $CPU --sam $BOWTIEINDEX -q trim/${input_trim} | samtools sort -@ ${CPU} | samtools view -b > alignments/${inputfile}.bam
+		samtools flagstat -@ $CPU alignments/${inputfile}.bam > alignments/${inputfile}.flagstat
+	fi
+
+### DUPLICATES
+	if test -s "alignments/${inputfile}.MD.bam"; then
+		echo "Duplicates in ${inputfile} sample already marked - SKIP MARKING DUPLICATES" 
+
+	else
+		export _JAVA_OPTIONS="${RAM}"
+
+		picard MarkDuplicates I=alignments/${inputfile}.bam O=alignments/${inputfile}.MD.bam M=alignments/${inputfile}.MD_metrics
+	fi
+
+	echo "FINISH ${inputfile} sample"
+	done 

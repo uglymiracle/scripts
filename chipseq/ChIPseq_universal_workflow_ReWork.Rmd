@@ -1,0 +1,92 @@
+---
+title: "ChIPseq_universal_workflow_ReWork"
+author: "PotapenkoEugene"
+date: "4/28/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+if (!requireNamespace("ChIPseeker", quietly = TRUE)) BiocManager::install("ChIPseeker")
+library(ChIPseeker)
+if (!requireNamespace("TxDb.Mmusculus.UCSC.mm10.knownGene", quietly = TRUE)) BiocManager::install("TxDb.Mmusculus.UCSC.mm10.knownGene")
+library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+txdb <- TxDb.Mmusculus.UCSC.mm10.knownGene
+if (!requireNamespace("org.Mm.eg.db", quietly = TRUE)) BiocManager::install("org.Mm.eg.db")
+library(org.Mm.eg.db)
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) BiocManager::install("org.Hs.eg.db")
+library(org.Hs.eg.db)
+```
+
+# Load data
+```{r}
+path_peaks = '/home/gene/Orthonectida/Projects/ChIPseqPCBP1/REWORKING/Peaks/FASTA'
+pattern = '*peaks.narrowPeak.sorted.centred$'
+path_plots = '/home/gene/Orthonectida/Projects/KATE/Plots/'
+DISTANCE = 3000
+###################################################################################
+
+files = list.files(
+       path = path_peaks,
+       pattern = pattern,
+       full.names = T)
+peaklist = lapply(files, readPeakFile)
+# Rename
+ordername = c('EpiLC', 'hnRNPK', 'Naive')
+names(peaklist) = ordername
+```
+
+# Draw Plots
+
+## TSS Distributions
+```{r}
+lapply(ordername, function(sample){
+  
+          plotname = paste0(path_plots,
+                            "Peak_distributions_TSS_", sample, "_", DISTANCE,'.png' )
+          
+          png(plotname, width=10, height=7, units="in", res=300)
+          
+          peakHeatmap(peaklist[[sample]], TxDb=txdb, upstream=DISTANCE, downstream=DISTANCE,
+                           color="red",title = plotname)
+
+          dev.off()
+          
+})
+```
+
+## Coverage chromosome plot
+``{r}
+lapply(ordername, function(sample){
+  
+          plotname = paste0(path_plots,
+                            "Coverage_Chromosome_", sample, "_",'.png' )
+          
+          png(plotname, width=10, height=7, units="in", res=300)
+          
+          covplot(peaklist[[sample]])
+
+          dev.off()
+})
+``
+
+# Peak Annotation
+```{r}
+lapply(ordername, function(sample){
+        
+      annoP = annotatePeak(peaklist[[sample]], tssRegion=c(-DISTANCE, DISTANCE),
+                         TxDb=txdb, annoDb="org.Mm.eg.db",
+                         genomicAnnotationPriority = c("Promoter", "5UTR", "3UTR", "Exon", "Intron", "Downstream", "Intergenic"))
+      
+      plotname = paste0(path_plots,
+                            "PeakAnnoPie_",sample, "_", DISTANCE,'.png')
+      png(plotname, width=10, height=7, units="in", res=300)
+      
+      plotAnnoPie(annoP)
+      
+      dev.off()
+      
+      })
+```
+

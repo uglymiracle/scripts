@@ -1,0 +1,40 @@
+#!/bin/bash
+
+# Run in WORKDIR
+#####################
+
+file=$1 #EpiLC_peaks.narrowPeak
+filename=${file%%.*} 
+halflen=$2  #centered
+chromsizefile=$3 #mm10.chrom.sizes
+bwinterest=$4 #bigwig of interest for heatmap (for example - histone modification)
+bwinterestname=${bwinterest%%.*}
+anumber=$5 #downstream kb for heatmap
+bnumber=$6 #upstream kb for heatmap
+
+#centered peaks
+
+cat $file | sort -k9nr > ${filename}.sorted
+mkdir centered
+centeredfile=${filename}.centered
+cat ${filename}.sorted | awk -v halflen=${halflen} 'BEGIN{ OFS="\t";}{ midPos=$2+$10; print $1, midPos-halflen, midPos+halflen; }' > centered/${centeredfile}
+
+#treatment
+
+macs2 bdgcmp -t ${filename}_treat_pileup.bdg -c ${filename}_control_lambda.bdg -o ${filename}_out.bdg -m ppois
+
+#make bigWig file
+
+(head -n 1 ${filename}_out.bdg && tail -n +2 ${filename}_out.bdg | sort -k1,1 -k2,2n | awk '{print $1,$2,$3,$4}' OFS="\t" )  > ${filename}.bedGraph.sort
+bedSort ${filename}.bedGraph.sort ${filename}_out.sort.bdg
+mkdir bigwigs 
+bedGraphToBigWig ${filename}_out.sort.bdg ${chromsizefile} bigwigs/${filename}.bw
+
+
+#Heatmaps
+
+mkdir heatmaps
+computeMatrix reference-point -S ${bwinterest} -R ${centeredfile} -a ${anumber} -b ${bnumber} -o heatmaps/${filename}_heatmap --skipZeros 
+
+plotHeatmap --matrixFile heatmaps/${filename}_heatmap -o ${filename}_${bwinterestname}.png --colorMap magma --missingDataColor 0 -T ${filename} --heatmapHeight 10
+

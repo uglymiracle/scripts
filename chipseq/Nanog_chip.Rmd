@@ -1,0 +1,888 @@
+---
+title: "ChIPseq"
+author: "PetrenkoKate"
+date: "3/28/2023"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(reticulate)
+options(reticulate.conda_binary = "/opt/conda/bin/python")
+use_condaenv(condaenv = 'base', required = TRUE)
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages('BiocManager')
+if (!requireNamespace("ChIPseeker", quietly = TRUE)) BiocManager::install("ChIPseeker")
+library(ChIPseeker)
+if (!requireNamespace("TxDb.Mmusculus.UCSC.mm10.knownGene", quietly = TRUE)) BiocManager::install("TxDb.Mmusculus.UCSC.mm10.knownGene")
+library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+txdb <- TxDb.Mmusculus.UCSC.mm10.knownGene
+if (!requireNamespace("org.Mm.eg.db", quietly = TRUE)) BiocManager::install("org.Mm.eg.db")
+library(org.Mm.eg.db)
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) BiocManager::install("org.Hs.eg.db")
+library(org.Hs.eg.db)
+if (!requireNamespace("readr", quietly = TRUE)) BiocManager::install("readr")
+library(readr)
+if (!requireNamespace("GenomicRanges", quietly = TRUE)) BiocManager::install("GenomicRanges")
+library(GenomicRanges)
+if (!requireNamespace("rtracklayer", quietly = TRUE)) BiocManager::install("rtracklayer")
+library(rtracklayer)
+if (!requireNamespace("IRanges", quietly = TRUE)) BiocManager::install("IRanges")
+library(IRanges)
+if (!requireNamespace("chipseq", quietly = TRUE)) BiocManager::install("chipseq", force = TR)
+library(chipseq)
+if (!requireNamespace("Gviz", quietly = TRUE)) BiocManager::install("Gviz")
+library(Gviz)
+if (!requireNamespace("VennDiagram", quietly = TRUE)) BiocManager::install("VennDiagram")
+library(VennDiagram)                    
+library("dplyr")
+if (!requireNamespace("labeling", quietly = TRUE)) install.packages('labeling')
+library(labeling)
+if (!requireNamespace("ChIPQC", quietly = TRUE)) BiocManager::install("ChIPQC")
+library(ChIPQC)  
+if (!requireNamespace("clusterProfiler", quietly = TRUE)) BiocManager::install("clusterProfiler")
+library(clusterProfiler)
+if (!requireNamespace("forcats", quietly = TRUE)) BiocManager::install("forcats")
+library(forcats)
+if (!requireNamespace("pathview", quietly = TRUE)) BiocManager::install("pathview")
+library(pathview)
+library(ggplot2)
+library(stringr)
+```
+
+# QC 
+```{r}
+samples <- read.csv('exp.csv', sep=';')
+chipObj <- ChIPQC(samples, annotation = 'mm10') 
+ChIPQCreport(chipObj, reportName="ChIP QC report: Nanog", reportFolder="ChIPQCreport")
+```
+
+# Read peaks
+```{r}
+peaks.naive <-  import.bedGraph('nanog/peaks_mm10/Naive_peaks.narrowPeak',
+                                format='narrowPeak')
+peaks.epilc <-  import.bedGraph('nanog/peaks_mm10/EpiLC_peaks.narrowPeak',
+                                format='narrowPeak')
+peaks.de <- import.bedGraph('nanog/peaks_mm10/DE_peaks.narrowPeak',
+                                format='narrowPeak')
+
+naive.track = AnnotationTrack(peaks.naive, 
+                               genome="mm10", name='Naive',
+                               shape='box',fill='blue3',size=2)
+epilc.track = AnnotationTrack(peaks.epilc, 
+                               genome="mm10", name='EpiLC',
+                               shape='box',fill='blue3',size=2)
+de.track = AnnotationTrack(peaks.de, 
+                               genome="mm10", name='DE',
+                               shape='box',fill='blue3',size=2)
+```
+
+```{r}
+ovlp <-  findOverlaps(peaks.epilc, peaks.de)
+```
+
+# Load data
+```{r}
+path_peaks = 'nanog/peaks_mm10/center/'
+pattern = '*_signal.bed$'
+path_plots = 'nanog/plots/'
+path_tables = 'nanog/tables/'
+DISTANCE = 3000
+###################################################################################
+
+files = list.files(
+       path = path_peaks,
+       pattern = pattern,
+       full.names = T)
+peaklist = lapply(files, readPeakFile)
+# Rename
+ordername = c('DE', 'EpiLC', 'Naive')
+names(peaklist) = ordername
+```
+# Draw Plots
+
+## TSS Distributions
+```{r}
+lapply(ordername, function(sample){
+  
+          plotname = paste0(path_plots,
+                            "Peak_distributions_TSS_", sample, "_", DISTANCE,'.png' )
+          
+          png(plotname, width=10, height=7, units="in", res=300)
+          
+          peakHeatmap(peaklist[[sample]], TxDb=txdb, upstream=DISTANCE, downstream=DISTANCE,
+                           color="red",title = plotname)
+
+          dev.off()
+          
+})
+```
+
+## Coverage chromosome plot
+```{r}
+lapply(ordername, function(sample){
+  
+          plotname = paste0(path_plots,
+                            "Coverage_Chromosome_", sample, '.png' )
+          
+          coverplot = covplot(peaklist[[sample]])
+          ggsave(plotname, coverplot, width=15, height=10, units="in")    
+})
+```
+## Covplot with weight
+```{r}
+covplot(peaklist, chrs=c("chr2"), title = "ChIP Peaks over Chr2") +
+  ylim(0, 1) +
+  facet_grid(rows = vars(.id)) +
+  theme(legend.position = 'none')
+```
+
+
+# Peak Annotation
+```{r}
+AnnoPeaks = lapply(ordername, function(sample){
+        
+      annoP = annotatePeak(peaklist[[sample]], tssRegion=c(-DISTANCE, DISTANCE),
+                         TxDb=txdb, annoDb="org.Mm.eg.db",
+                         genomicAnnotationPriority = c("Promoter", "5UTR", "3UTR", "Exon", "Intron", "Downstream", "Intergenic"))
+      
+      # Save Pie Plot 
+      plotname = paste0(path_plots,
+                            "PeakAnnoPie_",sample, "_", DISTANCE,'.png')
+      png(plotname, width=10, height=7, units="in", res=300)
+      
+      plotAnnoPie(annoP)
+      
+      dev.off()
+      
+      # Save df of annotated peaks
+      df = as.data.frame(annoP)
+      print(df)
+      filename = paste0('AnnotatedPeaks_', sample, '.tsv')
+      write.table(df, paste0(path_tables, filename), sep = '\t', row.names = F, quote = F)
+      })
+names(AnnoPeaks) = ordername
+```
+## Dists to tss
+```{r}
+peakAnno_naive <- annotatePeak(peaklist[['Naive']], tssRegion=c(-DISTANCE, DISTANCE), 
+                         TxDb=txdb, annoDb="org.Mm.eg.db")
+plotDistToTSS(peakAnno_naive, 
+              title="Distribution of transcription factor-binding loci\nrelative to TSS")
+
+peakAnno_epilc <- annotatePeak(peaklist[['EpiLC']], tssRegion=c(-DISTANCE, DISTANCE), 
+                         TxDb=txdb, annoDb="org.Mm.eg.db")
+plotDistToTSS(peakAnno_epilc, 
+              title="Distribution of transcription factor-binding loci\nrelative to TSS")
+
+peakAnno_de <- annotatePeak(peaklist[['DE']], tssRegion=c(-DISTANCE, DISTANCE), 
+                         TxDb=txdb, annoDb="org.Mm.eg.db")
+new_order <- c('Naive', 'EpiLC', 'DE')
+annoP_reordered <- annoP[new_order]
+plotDistToTSS(annoP_reordered, 
+              title="",
+                  )
+```
+
+## Barplots of annotations
+```{r}
+annoP <- lapply(peaklist, annotatePeak,
+                tssRegion=c(-DISTANCE, DISTANCE),
+                TxDb=txdb, annoDb="org.Mm.eg.db")
+#annoP <- lapply(annoP, function(x) {
+  #x@anno %>% 
+    #dplyr::mutate(annotation = 
+                    #str_replace_all(annotation, 
+                                  #'Promoter (1-2kb)',
+                                  #'Promoter (1-3kb)')) %>% 
+    #dplyr::mutate(annotation = 
+                    #str_replace_all(annotation, 
+                                  #'Promoter (2-3kb)',
+                                  #'Promoter (1-3kb)'))     
+#})
+
+plotAnnoBar(annoP_reordered)
+```
+# Genes overlap
+```{r}
+genes <- lapply(annoP, function(i) as.data.frame(i)$geneId)
+vennplot(genes)
+```
+
+```{r}
+naive0.01 <- readPeakFile('nanog/peaks_naive/center/Naive.bed')
+naive0.01_anno = annotatePeak(naive0.01, tssRegion=c(-DISTANCE, DISTANCE),
+                         TxDb=txdb, annoDb="org.Mm.eg.db",
+                         genomicAnnotationPriority = c("Promoter", "5UTR", "3UTR", "Exon",
+                                                       "Intron", "Downstream", "Intergenic"))
+
+as.data.frame(naive0.01_anno) %>% 
+  dplyr::mutate(annotation = 
+                  str_replace_all(annotation, 
+                                  'Intron .+, intron 1 of \\d+\\)',
+                                  'First intron')) %>% 
+  dplyr::mutate(annotation =
+                  str_replace_all(annotation, 
+                                  'Intron .+, intron \\d+ of \\d+\\)', 
+                                  'Other intron')) %>%   
+  dplyr::mutate(annotation = 
+                  str_replace_all(annotation, 
+                                  'Exon .+, exon 1 of \\d+\\)',
+                                  'First exon')) %>% 
+  dplyr::mutate(annotation =
+                  str_replace_all(annotation, 
+                                  'Exon .+, exon \\d+ of \\d+\\)', 
+                                  'Other exon')) %>%   
+  dplyr::count(annotation) %>% 
+  dplyr::arrange(desc(n))
+```
+
+```{r}
+Naive.table %>% 
+  dplyr::mutate(annotation = 
+                  str_replace_all(annotation, 
+                                  'Intron .+, intron 1 of \\d+\\)',
+                                  'First intron')) %>% 
+  dplyr::mutate(annotation =
+                  str_replace_all(annotation, 
+                                  'Intron .+, intron \\d+ of \\d+\\)', 
+                                  'Other intron')) %>%   
+  dplyr::mutate(annotation = 
+                  str_replace_all(annotation, 
+                                  'Exon .+, exon 1 of \\d+\\)',
+                                  'First exon')) %>% 
+  dplyr::mutate(annotation =
+                  str_replace_all(annotation, 
+                                  'Exon .+, exon \\d+ of \\d+\\)', 
+                                  'Other exon')) %>%   
+  dplyr::count(annotation) %>% 
+  dplyr::arrange(desc(n))
+```
+
+# Edit tables + make groups about annotation
+```{r}
+#edit_table = lapply(ordername, function(sample){
+      #table_name = paste0(path_tables,'AnnotatedPeaks_', sample, '.tsv')
+      #read_tsv(table_name)
+#})
+EpiLC.table <- read_tsv('nanog/tables/AnnotatedPeaks_EpiLC.tsv') %>% 
+  dplyr::mutate(annotation = 
+                  str_replace_all(annotation, 
+                                  'Intron .+, intron 1 of \\d+\\)',
+                                  'First intron')) %>% 
+  dplyr::mutate(annotation =
+                  str_replace_all(annotation, 
+                                  'Intron .+, intron \\d+ of \\d+\\)', 
+                                  'Other intron'))
+DE.table <- read_tsv('nanog/tables/AnnotatedPeaks_DE.tsv') %>% 
+  dplyr::mutate(annotation = 
+                  str_replace_all(annotation, 
+                                  'Intron .+, intron 1 of \\d+\\)',
+                                  'First intron')) %>% 
+  dplyr::mutate(annotation =
+                  str_replace_all(annotation, 
+                                  'Intron .+, intron \\d+ of \\d+\\)', 
+                                  'Other intron'))
+Naive.table <- read_tsv('nanog/tables/AnnotatedPeaks_Naive.tsv') %>% 
+  dplyr::mutate(annotation = 
+                  str_replace_all(annotation, 
+                                  'Intron .+, intron 1 of \\d+\\)',
+                                  'First intron')) %>% 
+  dplyr::mutate(annotation =
+                  str_replace_all(annotation, 
+                                  'Intron .+, intron \\d+ of \\d+\\)', 
+                                  'Other intron'))
+
+#EpiLC.table$start = EpiLC.table$start + 1
+#DE.table$start = DE.table$start + 1
+#Naive.table$start = Naive.table$start + 1
+
+Naive_only <- dplyr::anti_join(Naive.table, EpiLC.table, by = 'geneId') %>% 
+  dplyr::anti_join(DE.table, by = 'geneId') 
+EpiLC_only <- dplyr::anti_join(EpiLC.table, Naive.table, by = 'geneId') %>% 
+  dplyr::anti_join(DE.table, by = 'geneId') 
+DE_only <- dplyr::anti_join(DE.table, Naive.table, by = 'geneId') %>% 
+  dplyr::anti_join(EpiLC.table, by = 'geneId') 
+
+common_genes <- dplyr::semi_join(Naive.table, EpiLC.table, by='geneId') %>% 
+  dplyr::semi_join(DE.table, by='geneId') %>% 
+  dplyr::select(geneId) %>% 
+  unique()
+Naive.EpiLC <- dplyr::semi_join(Naive.table, EpiLC.table, by='geneId') %>% 
+  dplyr::select(geneId) %>% 
+  unique()
+Naive.DE <- dplyr::semi_join(Naive.table, DE.table, by='geneId') %>% 
+  dplyr::select(geneId) %>% 
+  unique()
+EpiLC.DE <- dplyr::semi_join(EpiLC.table, DE.table, by='geneId') %>% 
+  dplyr::select(geneId) %>% 
+  unique()
+```
+#Filter by distance to TSS
+```{r}
+Naive.TSS <- Naive.table %>% 
+  dplyr::filter(distanceToTSS >= -DISTANCE &
+                  distanceToTSS <= DISTANCE)
+Naive.TSS %>% 
+  write.table('nanog/fil_peaks/Naive.bed', sep = '\t', row.names = F, quote = F, col.names =F)
+
+
+EpiLC.TSS <- EpiLC.table %>% 
+  dplyr::filter(distanceToTSS >= -DISTANCE &
+                  distanceToTSS <= DISTANCE)
+EpiLC.TSS %>% 
+  write.table('nanog/fil_peaks/EpiLC.bed', sep = '\t', row.names = F, quote = F, col.names =F)
+
+
+DE.TSS <- DE.table %>% 
+  dplyr::filter(distanceToTSS >= -DISTANCE &
+                  distanceToTSS <= DISTANCE) 
+DE.TSS %>% 
+  write.table('nanog/fil_peaks/DE.bed', sep = '\t', row.names = F, quote = F, col.names =F)
+
+
+```
+
+
+#Enrichment
+```{r}
+EpiLC_sign <- EpiLC.table %>% 
+  dplyr::filter(distanceToTSS > -DISTANCE &
+                  distanceToTSS < DISTANCE)
+write_tsv(EpiLC_sign$geneId %>% as.data.frame(), file = paste0(path_tables, 'EpiLC.sign.tsv'))
+
+DE_sign <- DE.table %>% 
+  dplyr::filter(distanceToTSS > -DISTANCE &
+                  distanceToTSS < DISTANCE)
+write_tsv(DE_sign %>% 
+            dplyr::arrange(desc(V4)) %>% 
+            dplyr::select(geneId), file = paste0(path_tables, 'DE.sign.tsv'))
+
+Naive_sign <- Naive.table %>% 
+  dplyr::filter(distanceToTSS > -DISTANCE &
+                  distanceToTSS < DISTANCE)
+write_tsv(Naive_sign %>% 
+            dplyr::arrange(desc(V4)) %>% 
+            dplyr::slice(1:1300) %>% 
+            dplyr::select(geneId), file = paste0(path_tables, 'Naive.sign.tsv'))
+
+ego <- enrichGO(EpiLC_sign$geneId, org.Mm.eg.db, ont = "ALL")
+dotplot(ego, split="ONTOLOGY", showCategory = 15, font.size = 8) + 
+  facet_grid(ONTOLOGY~., scale="free")
+
+DE.ekegg <- enrichKEGG(DE_sign$geneId, organism = 'mmu', maxGSSize = 7000)
+EpiLC.ekegg <- enrichKEGG(EpiLC_sign$geneId, organism = 'mmu', maxGSSize = 7000)
+Naive.ekegg <- enrichKEGG(Naive_sign$geneId, organism = 'mmu', maxGSSize = 7000)
+
+DE.ekegg.table <- data.frame(pathway = DE.ekegg@result$Description,
+                             qvalue = DE.ekegg@result$qvalue,
+                             Count = DE.ekegg@result$GeneRatio) %>% 
+  mutate(pathway = sub(" - Mus musculus.*", "", pathway)) %>% 
+  mutate(Count = as.numeric(sub("/\\d+", "", Count)),
+         stage = 'DE') %>% 
+  dplyr::filter(qvalue < 0.05) 
+EpiLC.ekegg.table <- data.frame(pathway = EpiLC.ekegg@result$Description,
+                             qvalue = EpiLC.ekegg@result$qvalue,
+                             Count = EpiLC.ekegg@result$GeneRatio)   %>%
+  mutate(pathway = sub(" - Mus musculus.*", "", pathway)) %>% 
+  mutate(Count = as.numeric(sub("/\\d+", "", Count)),
+         stage = 'EpiLC')   %>% 
+  dplyr::filter(qvalue < 0.05) 
+Naive.ekegg.table <- data.frame(pathway = Naive.ekegg@result$Description,
+                             qvalue = Naive.ekegg@result$qvalue,
+                             Count = Naive.ekegg@result$GeneRatio)  %>%
+  mutate(pathway = sub(" - Mus musculus.*", "", pathway))  %>% 
+  mutate(Count = as.numeric(sub("/\\d+", "", Count)),
+         stage = 'Naive') %>% 
+  dplyr::filter(qvalue < 0.05) 
+
+common.ekegg.table <- intersect(Naive.ekegg.table$pathway, EpiLC.ekegg.table$pathway) %>% 
+  c(intersect(Naive.ekegg.table$pathway, DE.ekegg.table$pathway), 
+    intersect(EpiLC.ekegg.table$pathway, DE.ekegg.table$pathway)) %>% 
+  unique()
+
+
+ekegg.table <- rbind(Naive.ekegg.table, EpiLC.ekegg.table, DE.ekegg.table) %>% 
+  dplyr::filter(pathway %in% !!common.ekegg.table) %>% 
+  unique()
+
+ggplot(ekegg.table, aes(x=factor(stage, levels = c('Naive', 'EpiLC', 'DE')),
+                        y=fct_reorder(pathway, Count), size=Count, color=qvalue)) +
+  geom_point(alpha = 0.8) + 
+  xlab('Cell type') +
+  ylab('Pathways') +
+  theme_bw()
+```
+## GO
+```{r}
+DE.go <- enrichGO(DE_sign$geneId, org.Mm.eg.db, ont = 'BP')
+EpiLC.go <- enrichGO(EpiLC_sign$geneId, org.Mm.eg.db, ont = 'BP')
+Naive.go <- enrichGO(Naive_sign$geneId, org.Mm.eg.db, ont = 'BP')
+
+DE.go.table <- data.frame(pathway = DE.go@result$Description,
+                             qvalue = DE.go@result$qvalue,
+                             Count = DE.go@result$GeneRatio) %>% 
+  mutate(Count = as.numeric(sub("/\\d+", "", Count)),
+         stage = 'DE') %>% 
+  dplyr::filter(qvalue < 0.01) 
+EpiLC.go.table <- data.frame(pathway = EpiLC.go@result$Description,
+                             qvalue = EpiLC.go@result$qvalue,
+                             Count = EpiLC.go@result$GeneRatio)   %>%
+  mutate(Count = as.numeric(sub("/\\d+", "", Count)),
+         stage = 'EpiLC')   %>% 
+  dplyr::filter(qvalue < 0.01) 
+Naive.go.table <- data.frame(pathway = Naive.go@result$Description,
+                             qvalue = Naive.go@result$qvalue,
+                             Count = Naive.go@result$GeneRatio)  %>%
+  mutate(Count = as.numeric(sub("/\\d+", "", Count)),
+         stage = 'Naive') %>% 
+  dplyr::filter(qvalue < 0.01) 
+
+common.go.table <- intersect(Naive.go.table$pathway, EpiLC.go.table$pathway) %>% 
+  c(intersect(Naive.go.table$pathway, DE.go.table$pathway), 
+    intersect(EpiLC.go.table$pathway, DE.go.table$pathway)) %>% 
+  unique()
+
+common.go.table.all <- intersect(Naive.go.table$pathway, EpiLC.go.table$pathway) %>%
+  intersect(DE.go.table$pathway) %>% 
+  unique()
+
+only.Naive.pathways <- anti_join(Naive.go.table, EpiLC.go.table, by='pathway') %>% 
+  anti_join(DE.go.table, by='pathway')
+only.EpiLC.pathways <- anti_join(EpiLC.go.table, Naive.go.table, by='pathway') %>% 
+  anti_join(DE.go.table, by='pathway')
+only.DE.pathways <- anti_join(DE.go.table, Naive.go.table, by='pathway') %>% 
+  anti_join(EpiLC.go.table, by='pathway')
+
+go.table <- rbind(Naive.go.table, EpiLC.go.table, DE.go.table) %>% 
+  dplyr::group_by(stage) %>% 
+  dplyr::arrange(qvalue) %>% 
+  dplyr::slice(1:5) %>% 
+  rbind(rbind(Naive.go.table, EpiLC.go.table, DE.go.table) %>% 
+          dplyr::filter(pathway %in% !!common.go.table) %>% 
+          dplyr::group_by(stage) %>% 
+          dplyr::arrange(qvalue) %>% 
+          dplyr::slice(1:10)) %>% 
+  unique()
+  
+  
+go.table.bp <- go.table$pathway
+
+go.table <- rbind(Naive.go.table, EpiLC.go.table, DE.go.table) %>% 
+  dplyr::filter(pathway %in% !!common.go.table.all) %>% 
+  rbind(Naive.go.table %>% 
+          dplyr::filter(pathway %in% !!only.Naive.pathways$pathway) %>% 
+          dplyr::arrange(qvalue) %>% 
+          dplyr::slice(1:5)) %>% 
+  rbind(EpiLC.go.table %>% 
+          dplyr::filter(pathway %in% !!only.EpiLC.pathways$pathway) %>% 
+          dplyr::arrange(qvalue) %>% 
+          dplyr::slice(1:5)) %>% 
+  rbind(DE.go.table %>% 
+          dplyr::filter(pathway %in% !!only.DE.pathways$pathway) %>% 
+          dplyr::arrange(qvalue) %>% 
+          dplyr::slice(1:5)) 
+
+ggplot(go.table, aes(x=factor(stage, levels = c('Naive', 'EpiLC', 'DE')),
+                     y=fct_reorder(pathway, stage), size=Count, color=qvalue)) +
+  geom_point(alpha = 0.8) + 
+  xlab('Cell type') +
+  ylab('Pathways') +
+  theme_bw()
+
+map_genes <- function(geneID) {
+  mapIds(org.Mm.eg.db, str_split(geneID, "/"), "SYMBOL", "ENTREZID")
+}
+
+
+Naive.jene.table <- Naive.go@result %>% 
+  mutate(SYMBOLS = lapply(str_split(geneID, '/'), function(x) {
+    mapIds(org.Mm.eg.db, 
+                            keys = x, 
+                            column = "SYMBOL", 
+                            keytype = "ENTREZID") %>% 
+      paste(collapse = ',')
+  }
+  ))
+
+Naive.jene.table$SYMBOLS <- unlist(Naive.jene.table$SYMBOLS)
+
+EpiLC.jene.table <- EpiLC.go@result %>% 
+  mutate(SYMBOLS = lapply(str_split(geneID, '/'), function(x) {
+    mapIds(org.Mm.eg.db, 
+                            keys = x, 
+                            column = "SYMBOL", 
+                            keytype = "ENTREZID") %>% 
+      paste(collapse = ',') 
+  }
+  )) 
+
+EpiLC.jene.table$SYMBOLS <- unlist(EpiLC.jene.table$SYMBOLS)
+
+DE.jene.table <- DE.go@result %>% 
+  mutate(SYMBOLS = lapply(str_split(geneID, '/'), function(x) {
+    mapIds(org.Mm.eg.db, 
+                            keys = x, 
+                            column = "SYMBOL", 
+                            keytype = "ENTREZID") %>% 
+      paste(collapse = ',')
+  }
+  ))
+DE.jene.table$SYMBOLS <- unlist(DE.jene.table$SYMBOLS)
+
+write_tsv(Naive.jene.table, file = paste0(path_tables, 'Naive.go.tsv'))
+write_tsv(EpiLC.jene.table, file = paste0(path_tables, 'EpiLC.go.tsv'))
+write_tsv(DE.jene.table, file = paste0(path_tables, 'DE.go.tsv'))
+```
+## Common
+```{r}
+common.metascape <- semi_join(Naive_sign, EpiLC_sign, by='geneId') %>% 
+  semi_join(DE_sign, by='geneId') %>% 
+  dplyr::select(geneId) %>% 
+  unique()
+
+write_csv(common.metascape, file = paste0(path_tables, 'common.csv'))
+
+common.go <- enrichGO(common.metascape$geneId, org.Mm.eg.db, ont = 'BP')
+
+barplot(common.go, showCategory = 12)
+```
+## All sign genes
+```{r}
+union(Naive_sign$geneId, EpiLC_sign$geneId) %>% 
+  union(DE_sign$geneId) %>% 
+  length()
+```
+
+## Naive only
+```{r}
+Naive.only <- anti_join(Naive_sign, EpiLC_sign, by='geneId') %>% 
+  anti_join(DE_sign, by='geneId') %>% 
+  dplyr::arrange(desc(V4)) %>% 
+  dplyr::select(geneId) %>% 
+  unique() %>% 
+  dplyr::slice(1:3000)
+
+write_csv(Naive.only, file = paste0(path_tables, 'Naive.only.csv'))
+```
+
+## EpiLC only
+```{r}
+EpiLC.only <- anti_join(EpiLC_sign, Naive_sign, by='geneId') %>% 
+  anti_join(DE_sign, by='geneId') %>% 
+  dplyr::arrange(desc(V4)) %>% 
+  dplyr::select(geneId) %>% 
+  unique()
+
+write_csv(EpiLC.only, file = paste0(path_tables, 'EpiLC.only.csv'))
+```
+
+## DE only
+```{r}
+DE.only <- anti_join(DE_sign, Naive_sign, by='geneId') %>% 
+  anti_join(EpiLC_sign, by='geneId') %>% 
+  dplyr::arrange(desc(V4)) %>% 
+  dplyr::select(geneId) %>% 
+  unique() %>% 
+  dplyr::slice(1:3000)
+
+write_csv(DE.only, file = paste0(path_tables, 'DE.only.csv'))
+```
+
+# Subset and metascape
+```{r}
+Naive_metascape <- Naive_sign %>% 
+  dplyr::arrange(desc(V5)) %>% 
+  dplyr::select(ENSEMBL) %>% 
+  unique() %>% 
+  dplyr::slice(1:3000)
+
+write_csv(Naive_metascape, file = paste0(path_tables, 'Naive_top.csv'))
+
+EpiLC_metascape <- EpiLC_sign %>% 
+  dplyr::arrange(desc(V5)) %>% 
+  dplyr::select(ENSEMBL) %>% 
+  unique() 
+
+write_csv(EpiLC_metascape, file = paste0(path_tables, 'EpiLC_top.csv'))
+
+DE_metascape <- DE_sign %>% 
+  dplyr::arrange(desc(V5)) %>% 
+  dplyr::select(ENSEMBL) %>% 
+  unique() 
+
+write_csv(DE_metascape, file = paste0(path_tables, 'DE_top.csv'))
+```
+
+```{r}
+Naive.table %>% 
+  filter(SYMBOL == 'Eomes')
+```
+
+# Tracks
+```{r}
+Naive.bw <- import.bw('nanog/heatmaps/bw/Naive.bw', as='GRanges')
+EpiLC.bw <- import.bw('nanog/heatmaps/bw/EpiLC.bw', as='GRanges')
+DE.bw <- import.bw('nanog/heatmaps/bw//DE.bw', as='GRanges')
+
+Naive.track <- DataTrack(Naive.bw, col.histogram='skyblue4', 
+                         name="Naive")
+Naive.track <- setPar(Naive.track, "background.title","#4C5270")
+Naive.track <- setPar(Naive.track, "cex.title", 1)
+
+EpiLC.track <- DataTrack(EpiLC.bw, col.histogram='skyblue4', name="EpiLC")
+EpiLC.track <- setPar(EpiLC.track, "background.title","#4C5270")
+EpiLC.track <- setPar(EpiLC.track, "cex.title", 1)
+
+DE.track <- DataTrack(DE.bw, col.histogram='skyblue4', name="DE")
+DE.track <- setPar(DE.track, "background.title","#4C5270")
+DE.track <- setPar(DE.track, "cex.title", 1)
+
+txTr <- GeneRegionTrack(txdb, name = " ")
+txTr@range$symbol <- mapIds(org.Mm.eg.db, 
+                            keys=sub("\\.\\d+$", "", txTr@range$transcript) , 
+                            keytype="ENSEMBLTRANS", column="SYMBOL")
+symbol(txTr) <- ifelse(is.na(txTr@range$symbol), txTr@range$transcript, txTr@range$symbol)
+txTr <- setPar(txTr, "background.title","#4C5270")
+txTr <- setPar(txTr, "cex.title", 1)
+
+AT <- GenomeAxisTrack()
+```
+
+## Genes 
+### Oct4
+```{r}
+plotTracks(c(Naive.track, EpiLC.track, DE.track, txTr, AT), 
+           from=35503000, to=35509500, chromosome='chr17',
+           type="hist", ylim=c(0,700))
+```
+### Tet1
+```{r}
+plotTracks(c(Naive.track, EpiLC.track, DE.track, AT, txTr), 
+           from=68540000, to=68792377, chromosome='chr10',
+           type="hist")
+```
+### Eomes
+```{r}
+plotTracks(c(Naive.track, EpiLC.track, DE.track, txTr, AT), 
+           from=118481000, to=118494132, chromosome='chr9',
+           type="hist", ylim=c(0,13))
+```
+
+### Esrrb
+```{r}
+plotTracks(c(Naive.track, EpiLC.track, DE.track, txTr, AT), 
+           from=86429453, to=86593964, chromosome='chr12',
+           type="hist")
+```
+
+### Oct6
+```{r}
+plotTracks(c(Naive.track, EpiLC.track, DE.track, txTr, AT), 
+           from=124643000, to=124676165, chromosome='chr4',
+           type="hist", ylim=c(0,12))
+```
+
+### Foxa2
+```{r}
+plotTracks(c(Naive.track, EpiLC.track, DE.track, txTr, AT), 
+           from=148039673, to=148047765, chromosome='chr2',
+           type="hist", ylim=c(0,30))
+```
+### Jarid2
+
+```{r}
+plotTracks(c(Naive.track, EpiLC.track, DE.track, txTr, AT), 
+           from=44725952, to=44764451, chromosome='chr13',
+           type="hist", ylim=c(0,500))
+```
+
+### Rif1
+```{r}
+plotTracks(c(Naive.track, EpiLC.track, DE.track, txTr, AT), 
+           from=52064691, to=52122649, chromosome='chr2',
+           type="hist", ylim=c(0,450))
+```
+### Fgf5
+```{r}
+plotTracks(c(Naive.track, EpiLC.track, DE.track, txTr, AT), 
+           from=98252162, to=98279012, chromosome='chr5',
+           type="hist", ylim=c(0,750))
+```
+# Top signal
+```{r}
+Naive.top.signal <- Naive.table %>% 
+  dplyr::arrange(desc(V4)) %>% 
+  dplyr::slice(1:1000)
+
+EpiLC.top.signal <- EpiLC.table %>% 
+  dplyr::arrange(desc(V4)) %>% 
+  dplyr::slice(1:1000)
+  
+DE.top.signal <- DE.table %>% 
+  dplyr::arrange(desc(V4)) %>% 
+  dplyr::slice(1:1000)
+
+plotDistToTSS(list(Naive = Naive.top.signal, EpiLC = EpiLC.top.signal, DE = DE.top.signal), 
+              title="",
+                  )
+
+write_tsv(Naive.top.signal$geneId %>% as.data.frame(), file = paste0(path_tables, 'Naive.topsignal.tsv'))
+write_tsv(EpiLC.top.signal$geneId %>% as.data.frame(), file = paste0(path_tables, 'EpiLC.topsignal.tsv'))
+write_tsv(DE.top.signal$geneId %>% as.data.frame(), file = paste0(path_tables, 'DE.topsignal.tsv'))
+
+DE.topsignal.go <- enrichGO(DE.top.signal$geneId, org.Mm.eg.db, ont = 'MF')
+EpiLC.topsignal.go <- enrichGO(EpiLC.top.signal$geneId, org.Mm.eg.db, ont = 'MF')
+Naive.topsignal.go <- enrichGO(Naive.top.signal$geneId, org.Mm.eg.db, ont = 'MF')
+
+barplot(Naive.topsignal.go, showCategory = 12)
+barplot(EpiLC.topsignal.go, showCategory = 12)
+barplot(DE.topsignal.go, showCategory = 12)
+
+DE.topsignal.go.table <- DE.topsignal.go@result %>% 
+  mutate(SYMBOLS = lapply(str_split(geneID, '/'), function(x) {
+    mapIds(org.Mm.eg.db, 
+                            keys = x, 
+                            column = "SYMBOL", 
+                            keytype = "ENTREZID") %>% 
+      paste(collapse = ',')
+  }
+  ))
+DE.topsignal.go.table$SYMBOLS <- unlist(DE.topsignal.go.table$SYMBOLS)
+
+EpiLC.topsignal.go.table <- EpiLC.topsignal.go@result %>% 
+  mutate(SYMBOLS = lapply(str_split(geneID, '/'), function(x) {
+    mapIds(org.Mm.eg.db, 
+                            keys = x, 
+                            column = "SYMBOL", 
+                            keytype = "ENTREZID") %>% 
+      paste(collapse = ',')
+  }
+  ))
+EpiLC.topsignal.go.table$SYMBOLS <- unlist(EpiLC.topsignal.go.table$SYMBOLS)
+
+Naive.topsignal.go.table <- Naive.topsignal.go@result %>% 
+  mutate(SYMBOLS = lapply(str_split(geneID, '/'), function(x) {
+    mapIds(org.Mm.eg.db, 
+                            keys = x, 
+                            column = "SYMBOL", 
+                            keytype = "ENTREZID") %>% 
+      paste(collapse = ',')
+  }
+  ))
+Naive.topsignal.go.table$SYMBOLS <- unlist(Naive.topsignal.go.table$SYMBOLS)
+
+write_tsv(Naive.topsignal.go.table, file = paste0(path_tables, 'Naive.topsignal.go.tsv'))
+write_tsv(EpiLC.topsignal.go.table, file = paste0(path_tables, 'EpiLC.topsignal.go.tsv'))
+write_tsv(DE.topsignal.go.table, file = paste0(path_tables, 'DE.topsignal.go.tsv'))
+
+Naive.top.signal %>% 
+  dplyr::select(seqnames, start, end) %>% 
+  write.table('nanog/fastas/Naive.topsignal.bed', sep = '\t', row.names = F, quote = F, col.names =F)
+EpiLC.top.signal %>% 
+  dplyr::select(seqnames, start, end) %>% 
+  write.table('nanog/fastas/EpiLC.topsignal.bed', sep = '\t', row.names = F, quote = F, col.names =F)
+DE.top.signal %>% 
+  dplyr::select(seqnames, start, end) %>% 
+  write.table('nanog/fastas/DE.topsignal.bed', sep = '\t', row.names = F, quote = F, col.names =F)
+```
+
+```{r}
+venn.diagram(
+  x = list(Naive.top.signal$geneId, EpiLC.top.signal$geneId, DE.top.signal$geneId),
+  category.names = c("Naive" , "EpiLC" , "DE"),
+  filename = 'venn_diagramm.png',
+  output=TRUE
+)
+
+common.topsignal <- semi_join(Naive.top.signal, EpiLC.top.signal, by='geneId') %>% 
+  semi_join(DE.top.signal, by='geneId') 
+
+common.topsignal.go <- enrichGO(common.topsignal$geneId, org.Mm.eg.db, ont = 'BP')
+
+dotplot(common.topsignal.go,  showCategory = 15, font.size = 8)
+```
+# WP enrichment
+```{r}
+Naive.WP <- enrichWP(Naive_sign$geneId, organism = 'Mus musculus',
+                     pvalueCutoff=1, qvalueCutoff=1, minGSSize =1)
+Naive.WP <- DOSE::setReadable(Naive.WP, org.Mm.eg.db, keyType = "ENTREZID")
+
+barplot(Naive.WP, showCategory = 10) +
+  scale_fill_gradient(limits=c(0.05, 0), trans = 'reverse', low = "blue", 
+  high = "red") +
+  xlab('Genes count')
+dotplot(Naive.WP, showCategory = 10) 
+
+EpiLC.WP <- enrichWP(EpiLC_sign$geneId, organism = 'Mus musculus', 
+                     pvalueCutoff=1, qvalueCutoff=1, minGSSize =1)
+EpiLC.WP <- DOSE::setReadable(EpiLC.WP, org.Mm.eg.db, keyType = "ENTREZID")
+
+barplot(EpiLC.WP, showCategory = 10) +
+  scale_fill_gradient(limits=c(0.05, 0), trans = 'reverse', low = "blue", 
+  high = "red") +
+  xlab('Genes count')
+dotplot(EpiLC.WP, showCategory = 10)
+
+DE.WP <- enrichWP(DE_sign$geneId, organism = 'Mus musculus', 
+                  pvalueCutoff=1, qvalueCutoff=1, minGSSize =1)
+DE.WP <- DOSE::setReadable(DE.WP, org.Mm.eg.db, keyType = "ENTREZID")
+
+barplot(DE.WP, showCategory = 10) +
+  scale_fill_gradient(limits=c(0.05, 0), trans = 'reverse', low = "blue", 
+  high = "red") +
+  xlab('Genes count')
+dotplot(DE.WP, showCategory = 10) 
+
+common.WP <- enrichWP(common.metascape$geneId, organism = 'Mus musculus', 
+                  pvalueCutoff=1, qvalueCutoff=1, minGSSize =1)
+common.WP <- DOSE::setReadable(common.WP, org.Mm.eg.db, keyType = "ENTREZID")
+
+str(barplot(DE.WP, showCategory = 10))
+dotplot(common.WP, showCategory = 10) 
+
+write_tsv(Naive.WP@result, paste0(path_tables, 'Naive.WP.tsv'))
+write_tsv(EpiLC.WP@result, paste0(path_tables, 'EpiLC.WP.tsv'))
+write_tsv(DE.WP@result, paste0(path_tables, 'DE.WP.tsv'))
+```
+
+# common for wp enrichment
+```{r}
+naive.wp.genes <- unlist(str_split(Naive.WP@result$geneID[1], '/'))
+epilc.wp.genes <- unlist(str_split(EpiLC.WP@result$geneID[1], '/'))
+de.wp.genes <- unlist(str_split(DE.WP@result$geneID[1], '/'))
+common.gene.WP <- intersect(naive.wp.genes, epilc.wp.genes) %>% 
+  intersect(de.wp.genes)
+naive.epilc.wp <- intersect(naive.wp.genes, epilc.wp.genes) %>% 
+  setdiff(common.gene.WP)
+naive.de.wp <- intersect(naive.wp.genes, de.wp.genes) %>% 
+  setdiff(common.gene.WP)
+epilc.de.wp <- intersect(de.wp.genes, epilc.wp.genes) %>% 
+  setdiff(common.gene.WP)
+naive.wp.only <- setdiff(naive.wp.genes, common.gene.WP) %>% 
+  setdiff(naive.epilc.wp) %>% 
+  setdiff(naive.de.wp) 
+epilc.wp.only <- setdiff(epilc.wp.genes, common.gene.WP) %>% 
+  setdiff(naive.epilc.wp) %>% 
+  setdiff(epilc.de.wp) 
+de.wp.only <- setdiff(de.wp.genes, common.gene.WP) %>% 
+  setdiff(naive.de.wp) %>% 
+  setdiff(epilc.de.wp) 
+
+Naive.genes <- data_frame(Naive = c(common.gene.WP,
+                            naive.epilc.wp,
+                            naive.de.wp,
+                            naive.wp.only))
+EpiLC.genes <- data_frame(EpiLC = c(common.gene.WP,
+                            naive.epilc.wp,
+                            epilc.de.wp,
+                            epilc.wp.only))
+DE.genes <- data_frame(DE = c(common.gene.WP,
+                            naive.de.wp,
+                            epilc.de.wp,
+                            de.wp.only))
+
+write_tsv(Naive.genes, 'Naive.genes.tsv')
+write_tsv(EpiLC.genes, 'EpiLC.genes.tsv')
+write_tsv(DE.genes, 'DE.genes.tsv')
+```
+
