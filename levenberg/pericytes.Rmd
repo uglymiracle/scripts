@@ -1,0 +1,451 @@
+---
+title: "pericytes_analysis"
+output: html_document
+date: "2024-01-04"
+---
+
+```{r setup, include=FALSE, message = FALSE, warning = FALSE, include = FALSE }
+knitr::opts_chunk$set()
+if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+if (!requireNamespace("igraph", quietly = TRUE)) install.packages('igraph', repos='http://cran.rstudio.com/')
+if (!requireNamespace("dittoSeq", quietly = TRUE)) BiocManager::install("dittoSeq")
+library(dittoSeq)
+if (!requireNamespace("celldex", quietly = TRUE)) BiocManager::install("celldex")
+library(celldex)
+if (!requireNamespace("devtools", quietly = TRUE)) install.packages("devtools")
+if (!requireNamespace("Seurat", quietly = TRUE)) install.packages("Seurat")
+library(Seurat)
+if (!requireNamespace("clusterProfiler", quietly = TRUE)) BiocManager::install("clusterProfiler")
+library(clusterProfiler)
+if (!requireNamespace("plyr", quietly = TRUE)) install.packages("plyr")
+library(plyr)
+if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
+library(dplyr)
+library("BiocParallel")
+library(future)
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) BiocManager::install("org.Hs.eg.db")
+library(org.Hs.eg.db)
+if (!requireNamespace("clustree", quietly = TRUE)) install.packages('clustree')
+library(clustree)
+if (!requireNamespace("remotes", quietly = TRUE)) install.packages('remotes')
+if (!requireNamespace("R.utils", quietly = TRUE)) install.packages('R.utils')
+if (!requireNamespace("SeuratWrappers", quietly = TRUE)) 
+  remotes::install_github('satijalab/seurat-wrappers')
+library(SeuratWrappers)
+if (!requireNamespace("escape", quietly = TRUE)) BiocManager::install("escape")
+library(escape)
+if (!requireNamespace("destiny", quietly = TRUE)) BiocManager::install("destiny")
+library(destiny)
+if (!requireNamespace("presto", quietly = TRUE))
+  devtools::install_github('immunogenomics/presto')
+if (!requireNamespace("slingshot", quietly = TRUE)) BiocManager::install("kstreet13/slingshot")
+library(slingshot)
+if (!requireNamespace("mclust", quietly = TRUE)) install.packages("mclust")
+library(mclust)
+if(!require("pacman")) install.packages("pacman")
+pacman::p_load(ggthemes)
+library(ggbeeswarm)
+library(data.table)
+if (!requireNamespace("TSCAN", quietly = TRUE)) BiocManager::install("TSCAN")
+library(TSCAN)
+if (!requireNamespace("ggplotify", quietly = TRUE)) install.packages("ggplotify")
+library(ggplotify)
+library(grid)
+if (!requireNamespace("tradeSeq", quietly = TRUE)) BiocManager::install("tradeSeq")
+library(tradeSeq)
+library(forcats)
+if (!requireNamespace("scran", quietly = TRUE)) BiocManager::install("scran")
+library(scran)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+###################################################################################
+WORKDIR <- '~/levenberg/'
+PLOTSDIR <- '~/levenberg/plots/'
+use.name <- 'Pericytes'
+
+set.seed(555)
+
+CPU <- 8
+###################################################################################
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+my_colors <- c("#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#F08080FF", "#32CD32FF",
+               "#9ACD32FF", "#4682B4FF",
+               "#40E0D0FF",  "#F0E68CFF", "#D2B48CFF", "#8FBC8BFF", 
+               "#DDA0DDFF", "#5F9EA0FF", "#FFDAB9FF", "#FFA07AFF", "#87CEEBFF")
+
+plot_theme = theme_classic(base_size=12, base_family = 'Helvetica') + 
+             theme(plot.title = element_text(size = 14, face = 'bold')
+                   )
+```
+
+
+# Analysis of the effect of placental cells on the growth of pericytes
+
+```{r read data, include=FALSE}
+sc <- readRDS(paste0(WORKDIR, 'sc_2samples.rds'))
+pericytes <- subset(sc, idents == "Pericytes")
+# saveRDS(pericytes, paste0(WORKDIR, 'pericytes.rds'))
+# pericytes <- readRDS(paste0(WORKDIR, 'pericytes.rds'))
+# pericytes_pl <- subset(pericytes, subset = source == 'Pl.My.Pr.Hu.1' | source == 'My.Pr.Hu.1')
+# pericytes_all <- pericytes
+# pericytes <- pericytes_pl
+```
+
+
+
+```{r preprocessing, message=FALSE, warning=FALSE}
+# pericytes[["complexity"]] <- log10(pericytes$nFeature_RNA) / log10(pericytes$nCount_RNA)
+VlnPlot(pericytes, features = c("nFeature_RNA", "nCount_RNA", "percent.mt",
+                                "percent.ribo", "complexity"), 
+        ncol = 5, group.by = 'seurat_clusters')
+# pericytes <- subset(pericytes, subset = percent.mt < 5 & percent.ribo > 10 & complexity > 0.8)
+# pericytes <- FindVariableFeatures(pericytes, selection.method = "vst", nfeatures = 4000, assay = 'SCT')
+# var_feat <- VariableFeatures(pericytes)
+# var_regex <-  '^HLA-|^IG[HJKL]|^RNA|^MT|^RP'
+# var_feat <- grep(var_regex, var_feat, invert=T, value=T)
+#pericytes <- RunPCA(pericytes, verbose = FALSE, features = var_feat)
+
+# pericytes$SCT_snn_res.1 <- NULL
+pericytes <- RunPCA(pericytes, verbose = FALSE)
+pericytes <- RunUMAP(pericytes, reduction = "pca", dims = 1:30, verbose = FALSE)
+pericytes <- FindNeighbors(pericytes, reduction = "pca", dims = 1:30)
+pericytes <- FindClusters(pericytes, resolution = seq(0.1, 0.5, by=0.1))
+clustree(pericytes)
+
+Idents(pericytes) <- "SCT_snn_res.0.2"
+pericytes$seurat_clusters <- pericytes$SCT_snn_res.0.2
+
+dittoDimPlot(pericytes, reduction.use = "umap", var = "nFeature_RNA", size = 0.5) +
+  dittoDimPlot(pericytes, reduction.use = "umap", var = "nCount_RNA", size = 0.5) +
+  dittoDimPlot(pericytes, reduction.use = "umap", var = "percent.mt", size = 0.5)
+
+dittoDimPlot(pericytes, reduction.use = "umap", "source", size = 0.5, split.by = 'source') +
+  ggtitle('By sample')
+
+dittoDimPlot(pericytes, reduction.use = "umap", "source", size = 0.5, split.by = 'SCT_snn_res.0.1') +
+  ggtitle('Clusters by source')
+
+pericytes_heatmap <- SCTransform(pericytes, return.only.var.genes = FALSE) 
+```
+
+In the initial phase, pericytes clustering was performed from two experiments 
+(Pl.My.Pr.Hu.1, My.Pr.Hu.1), resulting in 4 clusters. There are 19251 cells in total in the 
+analysis.
+
+#TEMP
+```{r}
+grep('^COL[0-9]+', row.names(sc),value = T)
+FeaturePlot(sc, features = c('ACE2', 'CD73', 'CD29'))
+
+# ggsave(paste0(PLOTSDIR, 'cols.png'), width=20, height=40)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=TRUE}
+t <- table(pericytes$source) %>% 
+  as.data.frame()
+
+colnames(t) <- c('source', 'number of cells')
+
+t
+```
+
+```{r echo=FALSE, fig.height=5, fig.width=12, message=FALSE, warning=FALSE}
+p1 <- dittoDimPlot(pericytes, reduction.use = "umap", "SCT_snn_res.0.2", size = 1, 
+                   color.panel = my_colors) +
+  ggtitle('By clusters') +
+  plot_theme
+
+p2 <- dittoDimPlot(pericytes, reduction.use = "umap", "source", size = 1, , color.panel = my_colors) +
+  ggtitle('By source') +
+  plot_theme
+
+cowplot::plot_grid(p1, p2, 
+          #labels = c('My.Pr.Hu.1', 'Pl.My.Pr.Hu.1'),
+          nrow=1)
+#ggsave(paste0(PLOTSDIR, 'umap.png'), width=12, height=5)
+```
+Notably, cells from both experiments are present in each cluster. The distribution of clusters in the pla+ and pla- samples is approximately equal
+
+```{r echo=FALSE, fig.height=4, fig.width=10.5, message=FALSE, warning=FALSE}
+p1 <- dittoBarPlot(pericytes, "source", group.by = "seurat_clusters", color.panel = my_colors) +
+  ggtitle('') +
+  plot_theme +
+  NoLegend()
+p2 <- dittoBarPlot(pericytes, "source", group.by = "seurat_clusters", 
+                   scale='count', color.panel = my_colors) +
+  ggtitle('') +
+  plot_theme
+p3 <- dittoBarPlot(pericytes, "seurat_clusters", group.by = "source", 
+                   color.panel = my_colors) +
+  ggtitle('') +
+  plot_theme
+
+cowplot::plot_grid(p1, p2, p3, 
+          nrow=1, rel_widths = c(1, 1.5, 1),
+          labels = c('A', "B", "C"))
+#ggsave(paste0(PLOTSDIR, 'barplot.png'), width=12, height=5)
+```
+
+#TEMP - MARKERS
+```{r}
+FeaturePlot(pericytes_heatmap, features = c('COL1A2', 'COL5A1', 'PDGFRB', 'CSPG4', 'ACTA2', 'ADAM12'))
+```
+
+```{r}
+dittoPlot(pericytes, "VEGFA", group.by = "seurat_clusters", plots = c('boxplot'),
+          jitter.size = 0) +
+  NoLegend() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("p = %.2g", p),
+              step_increase = 0.15) +
+  ylim(0, 4)
+```
+
+## Differential expression (DE)
+
+Markers have been defined for each cluster.
+
+```{r markers, echo=FALSE, fig.height=4, fig.width=9, message=FALSE, warning=FALSE}
+markers.cluster <- FindAllMarkers(pericytes, only.pos = TRUE, min.pct = 0.25,
+                                    min.diff.pct = 0.1, logfc.threshold = 0.25)
+
+top7 <- markers.cluster %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>% 
+  top_n(n = 7, wt = avg_log2FC)
+
+
+dittoDotPlot(pericytes, vars = unique(top7$gene), group.by = "seurat_clusters", 
+             max.color='#6495EDFF', min.color='white') +
+  ylab('Clusters') +
+  plot_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+
+# VlnPlot(pericytes, features = unique(top5$gene), group.by = "SCT_snn_res.0.2") 
+#ggsave(paste0(PLOTSDIR, 'DEG.png'), width=8, height=4)
+```
+
+```{r heatmap, echo=FALSE, fig.height=5, fig.width=6, message=FALSE, warning=FALSE}
+DoHeatmap(pericytes_heatmap, features = unique(top7$gene), 
+          group.by = 'SCT_snn_res.0.2') +
+  scale_fill_gradientn(colors = c("#6495EDFF", "white", "#FF69B4FF")) +
+  theme(axis.text = element_text(size = 10))
+```
+
+THY1 - The encoded protein is widely used as a marker for hematopoietic stem cells. (https://www.genecards.org/cgi-bin/carddisp.pl?gene=THY1) angiogenesis, more proliferative
+
+```{r}
+FeaturePlot(pericytes, features = c("PDGFRB", "CSPG4"))
+```
+
+
+## GSEA
+
+According to the results of the enrichment analysis, it is observed that cluster 3 is represented by actively dividing cells. We are observing the enrichment of processes related to cell division and DNA replication.
+
+```{r GSEA, message=FALSE, warning=FALSE, include=FALSE}
+gene.sets <- getGeneSets(library = "H")
+
+ES <- enrichIt(obj = pericytes[["SCT"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = CPU,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES$cluster <- pericytes$seurat_clusters
+
+# write.table(ES, paste0(WORKDIR, use.name, 'GSEA.tsv'))
+# 
+# ES <- fread(paste0(WORKDIR, use.name, 'GSEA.tsv'))
+# ES <- ES %>% 
+#   dplyr::filter(V1 %in% colnames(pericytes))
+pericytes <- AddMetaData(pericytes, ES)
+```
+
+
+```{r echo=FALSE, fig.height=6, fig.width=10, message=FALSE, warning=FALSE}
+dittoPlot(pericytes, c( "HALLMARK_E2F_TARGETS", 
+                        "HALLMARK_DNA_REPAIR",
+                        "HALLMARK_G2M_CHECKPOINT",
+                        "HALLMARK_MITOTIC_SPINDLE"),
+          group.by = "source",
+          plots = c("vlnplot")) + 
+  scale_fill_manual(values = my_colors) +
+  plot_theme
+```
+Also, in cluster 4, there is an increased activity of genes regulated by interferon gamma, which is known for its influence on the processes of myogenesis. Based o ierarc
+
+```{r echo=FALSE, fig.height=3, fig.width=10, message=FALSE, warning=FALSE}
+my_comparisons <- list(c("Pl.My.Pr.Hu", "My.Pr.Hu"))
+dittoPlot(pericytes, c( "HALLMARK_APOPTOSIS",
+                        "HALLMARK_INTERFERON_GAMMA_RESPONSE",
+                        "HALLMARK_ANGIOGENESIS"),
+          group.by = "source",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  plot_theme +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) if (p <= 0.05) {sprintf("p = %.2g", p)} else {"ns"},
+              step_increase = 0.15) +
+  ylim(0, 1.5)
+
+```
+
+
+```{r gsea_go, message=FALSE, warning=FALSE, include=FALSE}
+
+# gene.sets <- getGeneSets(library = "C5")
+# 
+# ES_go <- enrichIt(obj = pericytes[["SCT"]]$counts,
+#                gene.sets = gene.sets,
+#                groups = 1500, cores = CPU,
+#                min.size = 5, #method = 'UCell',
+#                ssGSEA.norm = T)
+# ES_go$cluster <- pericytes$seurat_clusters
+# write.table(ES_go, paste0(WORKDIR, use.name, 'GSEA_go.tsv'))
+
+ES_go <- fread(paste0(WORKDIR, use.name, 'GSEA_go.tsv'))
+ES_go <- ES_go %>% 
+  dplyr::filter(V1 %in% colnames(pericytes))
+pericytes <- AddMetaData(pericytes, ES_go)
+
+```
+Cluster markers 0 and 2 are membrane proteins and proteins involved in cell adhesion. There is also enrichment in GSEA along adhesion-related pathways. There are studies confirming that adhesion is necessary and important for myogenesis.<sup>[12](https://www.sciencedirect.com/science/article/pii/S016748892100224X)</sup>
+
+```{r echo=FALSE, fig.height=3, fig.width=10, message=FALSE, warning=FALSE}
+dittoPlot(pericytes, c("GOBP_CELL_CELL_ADHESION",
+                        "GOBP_CELL_MATRIX_ADHESION",
+                        'GOBP_CELL_SUBSTRATE_ADHESION'
+                      ),
+          group.by = "seurat_clusters",
+          plots = c("vlnplot")) + 
+  scale_fill_manual(values = my_colors) +
+  plot_theme
+
+```
+
+```{r GSEA, message=FALSE, warning=FALSE, include=FALSE}
+gene.sets_reactome <- getGeneSets(library = "C2", subcategory = 'CP:REACTOME')
+
+ES_reactome <- enrichIt(obj = pericytes[["SCT"]]$counts,
+               gene.sets = gene.sets_reactome,
+               groups = 10000, cores = CPU,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+
+ES_reactome$cluster <- pericytes$seurat_clusters
+# 
+# write.table(ES, paste0(WORKDIR, use.name, '_GSEA.tsv'))
+# ES <- fread(paste0(WORKDIR, use.name, '_GSEA.tsv')) %>% 
+#   as.data.frame()
+pericytes <- AddMetaData(pericytes, ES_reactome)
+```
+
+```{r}
+my_comparisons <- list(c("Pl.My.Pr.Hu", "My.Pr.Hu"))
+dittoPlot(pericytes, c(
+                        "REACTOME_SIGNALING_BY_VEGF"),
+                        
+          group.by = "source",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  plot_theme +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) if (p <= 0.05) {sprintf("p = %.2g", p)} else {"ns"},
+              step_increase = 0.15) +
+  ylim(0, 1.5)
+```
+
+## Cell-cycle score
+
+```{r cell-cycle score, echo=FALSE, fig.height=5, fig.width=14, message=FALSE, warning=FALSE}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+pericytes <- CellCycleScoring(pericytes, s.features = s.genes, g2m.features = g2m.genes)
+
+p1 <- dittoDimPlot(pericytes, reduction.use = "umap", "Phase", size = 0.5, split.by = 'Phase', 
+             color.panel = my_colors) +
+  ggtitle('By phase') +
+  plot_theme +
+  NoLegend()
+
+p2 <- dittoBarPlot(pericytes, "Phase", group.by = "seurat_clusters", color.panel = my_colors) +
+  ggtitle('') +
+  plot_theme
+
+cowplot::plot_grid(p1, p2, 
+          nrow=1, rel_widths = c(1, 0.7),
+          labels = c("A", "B"))
+```
+
+## DE in one cluster
+
+```{r echo=FALSE, fig.height=6, fig.width=9, message=FALSE, warning=FALSE}
+pericytes$cluster_source <- paste(pericytes$seurat_clusters, pericytes$source, sep = "_")
+Idents(pericytes) <- "cluster_source"
+mono.de0 <- FindMarkers(pericytes,
+                       ident.1 = "0_Pl.My.Pr.Hu",
+                       ident.2 = "0_My.Pr.Hu",
+                       #only.pos = TRUE,
+                       min.pct = 0.4,
+                       min.diff.pct = 0.1, logfc.threshold = 0.25,
+                       verbose = FALSE)
+
+feat <- mono.de0 %>%
+  dplyr::filter(p_val_adj < 0.05) %>%
+  #head(n = 10, wt = avg_log2FC) %>%
+  row.names()
+
+my_comparisons <- list(c("Pl.My.Pr.Hu", "My.Pr.Hu"))
+dittoPlot(pericytes, var = c('CXCL1', 'CXCL2', 'CXCL3'), #cells.use = WhichCells(pericytes, ident = c("0_Pl.My.Pr.Hu", "0_My.Pr.Hu")),
+        group.by = "source", plots = c('boxplot'), jitter.size = 0) +
+  NoLegend() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) if (p <= 0.05) {sprintf("p = %.2g", p)} else {"ns"},
+              step_increase = 0.15) +
+  ylim(0, 4.5)
+```
+
+
+```{r}
+dittoPlot(pericytes, var = c('MMP1'), #cells.use = WhichCells(pericytes, ident = c("0_Pl.My.Pr.Hu", "0_My.Pr.Hu")),
+        group.by = "source", plots = c('boxplot'), jitter.size = 0) +
+  NoLegend() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) if (p <= 0.05) {sprintf("p = %.2g", p)} else {"ns"},
+              step_increase = 0.15) +
+  ylim(0, 4.5)
+```
+
+
+#DE by source
+```{r}
+Idents(pericytes) <- "source"
+pericytes$seurat_clusters <- pericytes$source
+
+markers.source <- FindAllMarkers(pericytes, min.pct = 0.5, #only.pos = TRUE, 
+                                   # min.diff.pct = 0.1, logfc.threshold = 0.25
+                                 )
+
+top10 <- markers.source %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>% 
+  top_n(n = 10, wt = avg_log2FC)
+
+
+dittoDotPlot(pericytes, vars = unique(top10$gene), 
+             max.color='#6495EDFF', min.color='white', 
+             group.by = 'seurat_clusters', scale =F) +
+  ylab('Source') +
+  plot_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+```
+

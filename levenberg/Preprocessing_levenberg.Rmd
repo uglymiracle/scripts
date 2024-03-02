@@ -1,0 +1,445 @@
+---
+title: "Preprocessing_levenberg"
+author: "Kate Petrenko"
+date: "2023-10-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+.libPaths = .libPaths()[1]
+if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+if (!requireNamespace("dittoSeq", quietly = TRUE)) BiocManager::install("dittoSeq")
+library(dittoSeq)
+if (!requireNamespace("celldex", quietly = TRUE)) BiocManager::install("celldex")
+library(celldex)
+if (!requireNamespace("devtools", quietly = TRUE)) install.packages("devtools")
+if (!requireNamespace("DoubletFinder", quietly = TRUE))  remotes::install_github('chris-mcginnis-ucsf/DoubletFinder')
+library(DoubletFinder)
+if (!requireNamespace("cowplot", quietly = TRUE)) install.packages("cowplot")
+library(cowplot)
+if (!requireNamespace("corrplot", quietly = TRUE)) install.packages("corrplot")
+library(corrplot)
+if (!requireNamespace("ggtree", quietly = TRUE)) BiocManager::install("ggtree")
+library(ggtree)
+if (!requireNamespace("SingleR", quietly = TRUE)) BiocManager::install("SingleR")
+library(SingleR)
+if (!requireNamespace("Seurat", quietly = TRUE)) install.packages("Seurat")
+library(Seurat)
+if (!requireNamespace("clusterProfiler", quietly = TRUE)) BiocManager::install("clusterProfiler")
+library(clusterProfiler)
+if (!requireNamespace("plyr", quietly = TRUE)) install.packages("plyr")
+library(plyr)
+if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
+library(dplyr)
+library(scuttle)
+library("BiocParallel")
+library(future)
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) BiocManager::install("org.Hs.eg.db")
+#library(org.Hs.eg.db)
+```
+
+```{r}
+###################################################################################
+WORKDIR <- '~/levenberg/'
+PLOTSDIR <- '~/levenberg/plots/'
+use.name <- 'All2'
+
+set.seed(555)
+
+CPU <- 8
+###################################################################################
+```
+
+# Read data
+```{r eval=FALSE, include=FALSE}
+sc1 <- Read10X_h5(paste0(WORKDIR, 'data/filtered_feature_bc_matrix_SL111_old.h5'))
+sc2 <- Read10X_h5(paste0(WORKDIR, 'data/filtered_feature_bc_matrix_SL112_old.h5'))
+sc3 <- Read10X_h5(paste0(WORKDIR, 'data/filtered_feature_bc_matrix_SL161.h5'))
+sc4 <- Read10X_h5(paste0(WORKDIR, 'data/filtered_feature_bc_matrix_SL162.h5'))
+sc5 <- Read10X_h5(paste0(WORKDIR, 'data/filtered_feature_bc_matrix_SL111.h5'))
+sc6 <- Read10X_h5(paste0(WORKDIR, 'data/filtered_feature_bc_matrix_SL112.h5'))
+
+sc1 <- sc1[,intersect(colnames(sc1), colnames(sc5))]+sc5[,intersect(colnames(sc1), colnames(sc5))]
+sc2 <- sc2[,intersect(colnames(sc2), colnames(sc6))]+sc6[,intersect(colnames(sc2), colnames(sc6))]
+```
+
+# My analysis
+
+## Function for doublet drop
+```{r}
+preprocess <- function(data, n) {
+  sc <- CreateSeuratObject(data, project = "muscle", min.cells = 10, min.features = 200)
+  sc[["percent.mt"]] <- PercentageFeatureSet(sc, pattern = "^MT-")
+  sc[["percent.ribo"]] <- PercentageFeatureSet(sc, pattern = "^RP[SL]")
+  sc[["complexity"]] <- log10(sc$nFeature_RNA) / log10(sc$nCount_RNA)
+  sc <- subset(sc, subset = percent.mt < 10 & percent.ribo > 5 & nFeature_RNA < 4000 & nFeature_RNA > 200 & complexity > 0.8)
+  sc <- SCTransform(sc, verbose = FALSE)
+  sc <- FindVariableFeatures(sc, selection.method = "vst",
+                                        nfeatures = 3000, verbose = T)
+  sc <- RunPCA(sc, verbose = F)
+  sc <- RunUMAP(sc, dims = 1:30, verbose = F)
+  sc <- FindNeighbors(object = sc, dims = 1:30)
+  sc <- FindClusters(object = sc)
+
+
+  sweep.res.list <- paramSweep(sc, PCs = 1:30, sct = TRUE)
+  sweep.stats <- summarizeSweep(sweep.res.list, GT = FALSE)
+  bcmvn_pbmc <- find.pK(sweep.stats)
+
+  pK <- bcmvn_pbmc %>% # select the pK that corresponds to max bcmvn to optimize doublet detection
+  filter(BCmetric == max(BCmetric)) %>%
+  select(pK)
+  pK <- as.numeric(as.character(pK[[1]]))
+
+  annotations <- sc@meta.data$seurat_clusters
+  homotypic.prop <- modelHomotypic(annotations)           ## ex: annotations <- seu_kidney@meta.data$ClusteringResults
+  nExp_poi <- round(n*nrow(sc@meta.data))  ## Assuming n% doublet formation rate - tailor for our dataset
+  nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+
+  sc <- doubletFinder(sc, pN = 0.25, pK = pK,
+                      nExp = nExp_poi.adj,
+                      reuse.pANN = FALSE,  PCs = 1:30, sct = TRUE)
+
+  DF.name <- colnames(sc@meta.data)[grepl("DF.classification", colnames(sc@meta.data))]
+  sc <- sc[, sc@meta.data[, DF.name] == "Singlet"]
+  sc
+}
+```
+
+## samples-preproc
+```{r}
+# sc1_dropdoublet <- preprocess(sc1, 0.1)
+# saveRDS(sc1_dropdoublet, paste0(WORKDIR, 'sc1_doubletdrop.rds'))
+# 
+# sc2_dropdoublet <- preprocess(sc2, 0.1)
+# saveRDS(sc2_dropdoublet, paste0(WORKDIR, 'sc2_doubletdrop.rds'))
+# 
+# sc3_dropdoublet <- preprocess(sc3, 0.4)
+# saveRDS(sc3_dropdoublet, paste0(WORKDIR, 'sc3_doubletdrop.rds'))
+# 
+# sc4_dropdoublet <- preprocess(sc4, 0.3)
+# saveRDS(sc4_dropdoublet, paste0(WORKDIR, 'sc4_doubletdrop.rds'))
+
+sc1_dropdoublet <- readRDS(paste0(WORKDIR, 'sc1_doubletdrop.rds'))
+sc2_dropdoublet <- readRDS(paste0(WORKDIR, 'sc2_doubletdrop.rds'))
+sc3_dropdoublet <- readRDS(paste0(WORKDIR, 'sc3_doubletdrop.rds'))
+sc4_dropdoublet <- readRDS(paste0(WORKDIR, 'sc4_doubletdrop.rds'))
+
+```
+
+# TEMP
+```{r}
+
+N = 10000
+raw <- cbind(sc1,
+             sc2,
+             sc3[,sample(ncol(sc3),N)],
+             sc4[,sample(ncol(sc4),N)])
+
+colnames(raw) = make.unique(colnames(raw))
+
+source <- c(rep('Pl.My.Pr.Hu.1', ncol(sc1)), #Myocytes + Pericytes + HUVEC + Placenta (batch1)
+            rep('My.Pr.Hu.1', ncol(sc2)), #Myocytes + Pericytes + HUVEC (batch1)
+            rep('My.Hu',N), #Myocytes + HUVEC
+            rep('Pl.My.Hu',N)) #Myocytes + HUVEC + Placenta
+```
+
+## Merge
+```{r}
+sc1_dropdoublet_df <- sc1_dropdoublet[["RNA"]]$counts 
+sc2_dropdoublet_df <- sc2_dropdoublet[["RNA"]]$counts 
+sc3_dropdoublet_df <- sc3_dropdoublet[["RNA"]]$counts 
+sc4_dropdoublet_df <- sc4_dropdoublet[["RNA"]]$counts 
+
+N <- 10000  #Number of cells
+
+sc1_dropdoublet_sample <- sc1[,colnames(sc1) %in% colnames(sc1_dropdoublet_df)] ; rm(sc1_dropdoublet_df)
+sc2_dropdoublet_sample <- sc2[,colnames(sc2) %in% colnames(sc2_dropdoublet_df)] ; rm(sc2_dropdoublet_df)
+sc3_dropdoublet_sample <- sc3[,colnames(sc3) %in% colnames(sc3_dropdoublet_df)] ; rm(sc3_dropdoublet_df)
+sc4_dropdoublet_sample <- sc4[,colnames(sc4) %in% colnames(sc4_dropdoublet_df)] ; rm(sc4_dropdoublet_df)
+
+
+raw <- cbind(sc1_dropdoublet_sample,
+             sc2_dropdoublet_sample,
+             sc3_dropdoublet_sample[, sample(ncol(sc3_dropdoublet_sample), N)],
+             sc4_dropdoublet_sample[, sample(ncol(sc4_dropdoublet_sample), N)])
+
+raw <- raw[, colnames(raw) != ""]
+colnames(raw) <- make.unique(colnames(raw))
+
+#names of cells
+source <- c(rep('Pl.My.Pr.Hu.1', ncol(sc1_dropdoublet_sample)), #Myocytes + Pericytes + HUVEC + Placenta (batch1)
+            rep('My.Pr.Hu.1', ncol(sc2_dropdoublet_sample)), #Myocytes + Pericytes + HUVEC (batch1)
+            rep('My.Hu',N), #Myocytes + HUVEC
+            rep('Pl.My.Hu',N)) #Myocytes + HUVEC + Placenta
+
+rm(sc2_dropdoublet_sample, sc1_dropdoublet_sample, sc3_dropdoublet_sample, sc4_dropdoublet_sample)
+```
+
+## Analysis
+```{r}
+sc <- CreateSeuratObject(raw, project = "muscle", min.cells = 10, min.features = 200)
+names(source) <- colnames(sc)
+sc$source <- source[colnames(sc)]
+sc[["percent.mt"]] <- PercentageFeatureSet(sc, pattern = "^MT-")
+sc[["percent.ribo"]] <- PercentageFeatureSet(sc, pattern = "^RP[SL]")
+sc[["complexity"]] <- log10(sc$nFeature_RNA) / log10(sc$nCount_RNA)
+
+VlnPlot(sc, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.ribo", "complexity"), 
+        ncol = 5)
+sc <- subset(sc, subset = percent.mt < 10 & percent.ribo > 10 & complexity > 0.8 & nFeature_RNA < 4000)
+# saveRDS(sc_doubletdrop, paste0(WORKDIR, 'sc_doubletdrop_allplacenta.rds'))
+sc <- readRDS(paste0(WORKDIR, 'sc_doubletdrop_allplacenta.rds'))
+
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+sc <- SCTransform(sc)
+
+# sc <- CellCycleScoring(sc, s.features = s.genes, g2m.features = g2m.genes)
+# 
+# sc$CC.Difference <- sc$S.Score - sc$G2M.Score
+# sc <- SCTransform(sc, vars.to.regress = "CC.Difference")
+
+# sc <- FindVariableFeatures(sc, selection.method = "vst", nfeatures = 4000, assay = 'SCT')
+# var_feat <- VariableFeatures(sc)
+# var_regex <-  '^HLA-|^IG[HJKL]|^RNA|^MT|^RP'
+# var_feat <- grep(var_regex, var_feat, invert=T, value=T)
+
+# sc <- RunPCA(sc, features = var_feat)
+sc <- RunPCA(sc)
+sc <- RunUMAP(sc, reduction = "pca", dims = 1:30)
+dittoDimPlot(sc, reduction.use = "umap", 'source', size = 0.5) 
+DimPlot(sc, reduction = "umap", size = 0.5) 
+sc <- FindNeighbors(sc, dims = 1:30)
+sc <- FindClusters(sc, resolution = 1)
+
+dittoDimPlot(sc, reduction.use = "umap", 'source', size = 0.5) 
+dittoDimPlot(sc, reduction.use = "umap", 'c', size = 0.5) 
+#saveRDS(sc, paste0(WORKDIR, 'sc_integrate.rds'))
+#sc <- readRDS(paste0(WORKDIR, 'sc_integrate.rds'))
+```
+
+# Some useful plots for clusterization 
+```{r}
+#sc <- createBasicSC(raw, source)
+
+#Idents(object = sc_doubletdrop) <- "SCT_snn_res.1.8"
+#rm(raw)
+dittoDimPlot(sc, reduction.use = "umap", "seurat_clusters", size = 0.5) +
+  ggtitle('By clusters')
+
+dittoDimPlot(sc, reduction.use = "umap", "seurat_clusters",
+             size = 0.5, split.by = 'seurat_clusters') +
+  NoLegend()
+#sc <- readRDS(paste0(WORKDIR, 'levengberg_my19.rds'))
+#umap by samples
+p0 <- dittoDimPlot(sc, reduction.use = "umap", "source", size = 0.5) + 
+  ggtitle('By sample')
+p0
+
+dittoDimPlot(sc, reduction.use = "umap", var = "nFeature_RNA", size = 0.5) +
+  dittoDimPlot(sc, reduction.use = "umap", var = "nCount_RNA", size = 0.5) +
+  dittoDimPlot(sc, reduction.use = "umap", var = "percent.mt", size = 0.5)
+
+p1 <- dittoDimPlot(sc, reduction.use = "umap", "source",size = 0.5,split.by = 'source') +
+  ggtitle('By sample')
+p1
+```
+
+## Corrplot
+```{r}
+tbl <- table(sc$source, sc$seurat_clusters)
+
+corrplot(t(ceiling(100*t(tbl)/colSums(tbl))), is.corr=F,method = 'square', addCoef.col = 'black')
+```
+### Define clusters
+```{r}
+p3 <- dittoBarPlot(sc, "source", group.by = "seurat_clusters") +
+  ggtitle('')
+p3
+
+p3.1 <- dittoBarPlot(sc, "source", group.by = "seurat_clusters", scale='count') +
+  ggtitle('')
+p3.1
+
+p3.2 <- dittoBarPlot(sc, "seurat_clusters", group.by = "source", scale='count') +
+  ggtitle('')
+p3.2
+
+p3.3 <- dittoBarPlot(sc, "source", group.by = "seurat_clusters", scale='count') +
+  ggtitle('')
+p3.3
+```
+
+### Rename clusters
+```{r}
+new.cluster.ids <- c('0'='Pericytes',
+                     '1'='Myoblasts',
+                     '2'='Pericytes',
+                     '3'='Myoblasts',
+                     '4'='Myoblasts',
+                     '5'='Pericytes', #maybe myo
+                     '6'='Myoblasts', 
+                     '7'='Placenta',
+                     '8'='Pericytes',
+                     '9'='Myoblasts',
+                     '10'='Myoblasts',
+                     '11'='Myoblasts',
+                     '12'='Pericytes',
+                     '13'='Pericytes', 
+                     '14'='Pericytes', 
+                     '15'='Pericytes',
+                     '16'='Myoblasts', 
+                     '17'='Placenta',
+                     '18'='Myoblasts',
+                     '19'='Myoblasts', 
+                     '20'='Pericytes',
+                     '21'='HUVEC',
+                     '22'='Myoblasts',
+                     '23'='Pericytes'
+                     # '24'='Pericytes', #may be myoblasts
+                     # '25'='Myoblasts',
+                     # '26'='Myoblasts',
+                     # '27'='HUVEC',
+                     # '28'='Myoblasts',
+                     # '29'='Myoblasts',
+                     # '30'='Myoblasts',
+                     # '31'='Pericytes',
+                     # '32'='Placenta',
+                     # '33'='Pericytes',
+                     # '34'='Pericytes',
+                     # '35'='Placenta',
+                     # '36'='Pericytes',
+                     # '37'='Placenta',
+                     # '38'='Myoblasts',
+                     # '39'='Pericytes',
+                     # '40'='Placenta',
+                     # '41'='Placenta'
+                     
+                     
+)
+
+new.cluster.ids2 <- new.cluster.ids
+new.cluster.ids <- make.unique(new.cluster.ids)
+names(new.cluster.ids) <- levels(sc)
+sc <- RenameIdents(sc, new.cluster.ids)
+sc$idents <- sc@active.ident
+```
+
+
+### Plots
+```{r}
+p1 <- dittoDimPlot(sc, reduction.use = "umap", "source",size = 0.5,split.by = 'source') +
+  ggtitle('By sample')
+p1
+ggsave(paste0(PLOTSDIR, use.name,'.plot1.png'), width=8, height=7)
+
+p2 <- dittoDimPlot(sc, reduction.use = "umap", "idents", size = 0.5, split.by = 'source') +
+  ggtitle('By sample')
+p2
+ggsave(paste0(PLOTSDIR, use.name,'.plot2.png'), width=8, height=7)
+
+p2.1 <- dittoDimPlot(sc, reduction.use = "umap", "idents", size = 0.5, split.by = 'idents') +
+  ggtitle('By clusters') +
+  NoLegend()
+p2.1
+ggsave(paste0(PLOTSDIR, use.name,'.plot2.1.png'), width=8, height=7)
+
+p2.0 <- dittoDimPlot(sc, reduction.use = "umap", "idents", size = 0.5) +
+  ggtitle('By clusters')
+p2.0
+ggsave(paste0(PLOTSDIR, use.name,'.plot2.0.png'), width=7, height=7)
+```
+
+```{r}
+names(new.cluster.ids2) <- levels(sc)
+sc <- RenameIdents(sc, new.cluster.ids2)
+sc$idents2 <- sc@active.ident
+
+#saveRDS(sc, paste0(WORKDIR, 'levengberg_kate.rds'))
+
+p2.3 <- dittoDimPlot(sc, reduction.use = "umap", "idents2", size = 0.5) +
+  ggtitle('By clusters')
+p2.3
+ggsave(paste0(PLOTSDIR, use.name, '.plot2.3.png'), width=7, height=7)
+
+p2.4 <- dittoDimPlot(sc, reduction.use = "umap", "idents2", size = 0.5, split.by = 'source') +
+  ggtitle('By sample')
+p2.4
+ggsave(paste0(PLOTSDIR, use.name,'.plot2.4.png'), width=8, height=7)
+```
+
+## Distribution of cell types
+```{r}
+p3 <- dittoBarPlot(sc, "source", group.by = "idents") +
+  ggtitle('')
+p3
+ggsave(paste0(PLOTSDIR, use.name,'.bars1.png'), width=7, height=7)
+
+p3.1 <- dittoBarPlot(sc, "source", group.by = "idents", scale='count') +
+  ggtitle('')
+p3.1
+ggsave(paste0(PLOTSDIR, use.name,'.bars2.png'), width=7, height=7)
+
+p3.2 <- dittoBarPlot(sc, "idents", group.by = "source", scale='count') +
+  ggtitle('')
+p3.2
+ggsave(paste0(PLOTSDIR, use.name,'.bars3.png'), width=7, height=7)
+
+p3.3 <- dittoBarPlot(sc, "source", group.by = "idents", scale='count') +
+  ggtitle('')
+p3.3
+ggsave(paste0(PLOTSDIR, use.name,'.bars4.png'), width=7, height=7)
+```
+
+## Summary plot for clusterisation
+```{r}
+sc@active.ident <- sc$idents2
+markers.cluster <- FindAllMarkers(sc, only.pos = TRUE, min.pct = 0.25,
+                                  min.diff.pct = 0.25, logfc.threshold = 0.25)
+top5 <- markers.cluster %>% 
+  group_by(cluster) %>% 
+  top_n(n = 15, wt = avg_log2FC)
+p4 <- dittoDotPlot(sc, vars = unique(top5$gene), group.by = "idents2", 
+                   max.color='blue', min.color='white', scale=F) +
+  ylab('Clusters')
+p4
+ggsave(paste0(PLOTSDIR, use.name, '.plot4.png'), width=12, height=6)
+```
+
+```{r}
+plot_grid(plot_grid(p1, p2, labels = c('A', 'B')), 
+          plot_grid(p3, labels = c('C')), 
+          plot_grid(p4, labels = c('D')), nrow=3)
+ggsave(paste0(PLOTSDIR, use.name, '.figure1_allplacenta.png'), width=14, height=14)
+
+plot_grid(plot_grid(p2.3, labels = c('A')), 
+          plot_grid(p2.4, labels = c('B')), nrow=2)
+ggsave(paste0(PLOTSDIR, use.name, '.figure2_allplacenta.png'), width=10, height=14)
+
+saveRDS(sc, paste0(WORKDIR, 'sc_allplacenta_postanalysis.rds'))
+```
+
+# Dendrogram of the clusters
+```{r}
+sc <- BuildClusterTree(
+  sc,
+  dims = 1:15,
+  reorder = FALSE,
+  reorder.numeric = FALSE
+)
+tree <- sc@tools$BuildClusterTree
+tree$tip.label <- paste0("Cluster ", tree$tip.label)
+ggtree::ggtree(tree, aes(x, y)) +
+  scale_y_reverse() +
+  ggtree::geom_tree() +
+  ggtree::theme_tree() +
+  ggtree::geom_tiplab(offset = 1) +
+  ggtree::geom_tippoint(color=sample(colors(), length(tree$tip.label)), shape = 16, size = 5) +
+  coord_cartesian(clip = 'off') +
+  theme(plot.margin = unit(c(0,2.5,0,0), 'cm'))
+
+sample(colors(), length(tree$tip.label))
+```
+

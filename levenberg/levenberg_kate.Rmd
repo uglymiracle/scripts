@@ -1,0 +1,1080 @@
+---
+title: "levenberg_Kate"
+author: "Kate Petrenko"
+date: "2023-10-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+.libPaths = .libPaths()[1]
+if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+if (!requireNamespace("dittoSeq", quietly = TRUE)) BiocManager::install("dittoSeq")
+library(dittoSeq)
+if (!requireNamespace("celldex", quietly = TRUE)) BiocManager::install("celldex")
+library(celldex)
+if (!requireNamespace("devtools", quietly = TRUE)) install.packages("devtools")
+if (!requireNamespace("DoubletFinder", quietly = TRUE))  remotes::install_github('chris-mcginnis-ucsf/DoubletFinder')
+library(DoubletFinder)
+if (!requireNamespace("cowplot", quietly = TRUE)) install.packages("cowplot")
+library(cowplot)
+if (!requireNamespace("corrplot", quietly = TRUE)) install.packages("corrplot")
+library(corrplot)
+if (!requireNamespace("ggtree", quietly = TRUE)) BiocManager::install("ggtree")
+library(ggtree)
+if (!requireNamespace("SingleR", quietly = TRUE)) BiocManager::install("SingleR")
+library(SingleR)
+if (!requireNamespace("Seurat", quietly = TRUE)) install.packages("Seurat")
+library(Seurat)
+if (!requireNamespace("clusterProfiler", quietly = TRUE)) BiocManager::install("clusterProfiler")
+library(clusterProfiler)
+if (!requireNamespace("plyr", quietly = TRUE)) install.packages("plyr")
+library(plyr)
+if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
+library(dplyr)
+library(scuttle)
+library("BiocParallel")
+library(future)
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) BiocManager::install("org.Hs.eg.db")
+library(org.Hs.eg.db)
+if (!requireNamespace("factoextra", quietly = TRUE))install.packages("factoextra")
+library(factoextra)
+if (!requireNamespace("NbClust", quietly = TRUE)) install.packages('NbClust')
+library(NbClust)
+if (!requireNamespace("clustree", quietly = TRUE)) install.packages('clustree')
+library(clustree)
+#if (!requireNamespace("monocle3", quietly = TRUE)) BiocManager::install('monocle3')
+#library(monocle3)
+if (!requireNamespace("TSCAN", quietly = TRUE)) BiocManager::install("TSCAN")
+library(TSCAN)
+```
+
+```{r}
+###################################################################################
+WORKDIR <- '/bigdata/katepetrenko/levenberg/'
+PLOTSDIR <- '/bigdata/katepetrenko/levenberg/plots/'
+use.name <- 'All2'
+
+set.seed(555)
+
+CPU <- 8
+###################################################################################
+```
+
+# Read data
+```{r eval=FALSE, include=FALSE}
+sc1 <- Read10X_h5(paste0(WORKDIR, 'data/filtered_feature_bc_matrix_SL111_old.h5'))
+sc2 <- Read10X_h5(paste0(WORKDIR, 'data/filtered_feature_bc_matrix_SL112_old.h5'))
+sc3 <- Read10X_h5(paste0(WORKDIR, 'data/filtered_feature_bc_matrix_SL161.h5'))
+sc4 <- Read10X_h5(paste0(WORKDIR, 'data/filtered_feature_bc_matrix_SL162.h5'))
+```
+
+# My analysis
+
+## Function for doublet drop
+```{r}
+preprocess <- function(data, n) {
+  sc <- CreateSeuratObject(data, project = "muscle", min.cells = 10, min.features = 200)
+  sc[["percent.mt"]] <- PercentageFeatureSet(sc, pattern = "^MT-")
+  sc[["percent.ribo"]] <- PercentageFeatureSet(sc, pattern = "^RP[SL]")
+  sc <- subset(sc, subset = percent.mt < 10 & percent.ribo > 5 & nFeature_RNA < 4000 & nFeature_RNA > 200)
+  sc <- SCTransform(sc, verbose = FALSE)
+  sc <- FindVariableFeatures(sc, selection.method = "vst",
+                                        nfeatures = 3000, verbose = T)
+  sc <- RunPCA(sc, verbose = F)
+  sc <- RunUMAP(sc, dims = 1:30, verbose = F)
+  sc <- FindNeighbors(object = sc, dims = 1:30)
+  sc <- FindClusters(object = sc)
+  
+
+  sweep.res.list <- paramSweep_v3_Seurat5(sc, PCs = 1:30, sct = TRUE)
+  sweep.stats <- summarizeSweep(sweep.res.list, GT = FALSE)
+  bcmvn_pbmc <- find.pK(sweep.stats)
+  
+  pK <- bcmvn_pbmc %>% # select the pK that corresponds to max bcmvn to optimize doublet detection
+  filter(BCmetric == max(BCmetric)) %>%
+  select(pK) 
+  pK <- as.numeric(as.character(pK[[1]]))
+  
+  annotations <- sc@meta.data$seurat_clusters
+  homotypic.prop <- modelHomotypic(annotations)           ## ex: annotations <- seu_kidney@meta.data$ClusteringResults
+  nExp_poi <- round(n*nrow(sc@meta.data))  ## Assuming n% doublet formation rate - tailor for our dataset
+  nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+
+  sc <- doubletFinder_v3_SeuratV5(sc, pN = 0.25, pK = pK,
+                                     nExp = nExp_poi.adj,
+                                     reuse.pANN = FALSE,  PCs = 1:30, sct = TRUE)
+  
+  DF.name <- colnames(sc@meta.data)[grepl("DF.classification", colnames(sc@meta.data))]
+  sc <- sc[, sc@meta.data[, DF.name] == "Singlet"]
+  sc
+}
+```
+
+## samples-preproc
+```{r}
+sc1_dropdoublet <- preprocess(sc1, 0.1)
+sc2_dropdoublet <- preprocess(sc2, 0.1)
+sc3_dropdoublet <- preprocess(sc3, 0.4)
+sc4_dropdoublet <- preprocess(sc4, 0.3)
+```
+# Integrate 
+```{r}
+plan("multisession", workers = 10)
+options(future.globals.maxSize = 7000 * 1024^2)
+sc1_dropdoublet$source <- 'Pl.My.Pr.Hu.1'
+sc2_dropdoublet$source <- 'My.Pr.Hu.1'
+sc3_dropdoublet$source <- 'My.Hu'
+sc4_dropdoublet$source <- 'Pl.My.Hu'
+
+sc.list <- list(Pl.My.Pr.Hu.1 = sc1_dropdoublet, 
+                My.Pr.Hu.1 = sc2_dropdoublet,
+                My.Hu = sc3_dropdoublet,
+                Pl.My.Hu = sc4_dropdoublet)
+
+features <- SelectIntegrationFeatures(object.list = sc.list, nfeatures = 4000)
+var_regex <-  '^HLA-|^IG[HJKL]|^RNA|^MT|^RP'
+features <- grep(var_regex, features, invert=T, value=T)
+sc.list <- PrepSCTIntegration(object.list = sc.list, anchor.features = features)
+
+sc.integrate.anchors <- FindIntegrationAnchors(object.list = sc.list, normalization.method = "SCT",
+    anchor.features = features, reduction = "rpca")
+sc.integrate <- IntegrateData(anchorset = sc.integrate.anchors, normalization.method = "SCT")
+```
+
+## Merge
+```{r}
+sc1_dropdoublet_df <- sc1_dropdoublet[["RNA"]]$counts
+sc2_dropdoublet_df <- sc2_dropdoublet[["RNA"]]$counts
+sc3_dropdoublet_df <- sc3_dropdoublet[["RNA"]]$counts
+sc4_dropdoublet_df <- sc4_dropdoublet[["RNA"]]$counts
+
+N <- 10000  #Number of cells
+
+sc1_dropdoublet_sample <- sc1[,colnames(sc1) %in% colnames(sc1_dropdoublet_df)]
+sc2_dropdoublet_sample <- sc2[,colnames(sc2) %in% colnames(sc2_dropdoublet_df)]
+sc3_dropdoublet_sample <- sc3[,colnames(sc3) %in% colnames(sc3_dropdoublet_df)]
+sc4_dropdoublet_sample <- sc4[,colnames(sc4) %in% colnames(sc4_dropdoublet_df)]
+
+
+raw <- cbind(sc1_dropdoublet_sample[, sample(ncol(sc1_dropdoublet_sample), N)],
+             sc2_dropdoublet_sample[, sample(ncol(sc2_dropdoublet_sample), N)],
+             sc3_dropdoublet_sample[, sample(ncol(sc3_dropdoublet_sample), N)],
+             sc4_dropdoublet_sample[, sample(ncol(sc4_dropdoublet_sample), N)])
+colnames(raw) <- make.unique(colnames(raw))
+
+#names of cells
+source <- c(rep('Pl.My.Pr.Hu.1',N), #Myocytes + Pericytes + HUVEC + Placenta (batch1)
+            rep('My.Pr.Hu.1',N), #Myocytes + Pericytes + HUVEC (batch1)
+            rep('My.Hu',N), #Myocytes + HUVEC
+            rep('Pl.My.Hu',N)) #Myocytes + HUVEC + Placenta
+
+```
+
+## Analysis
+```{r}
+sc_doubletdrop <- CreateSeuratObject(raw, project = "muscle", min.cells = 10, min.features = 200)
+names(source) <- colnames(sc_doubletdrop)
+sc_doubletdrop$source <- source[colnames(sc_doubletdrop)]
+sc_doubletdrop[["percent.mt"]] <- PercentageFeatureSet(sc_doubletdrop, pattern = "^MT-")
+sc_doubletdrop[["percent.ribo"]] <- PercentageFeatureSet(sc_doubletdrop, pattern = "^RP[SL]")
+
+#saveRDS(sc_doubletdrop, paste0(WORKDIR, 'sc_doubletdrop.rds'))
+#sc <- readRDS(paste0(WORKDIR, 'sc_doubletdrop.rds'))
+
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+sc <- SCTransform(sc)
+
+sc <- CellCycleScoring(sc, s.features = s.genes, g2m.features = g2m.genes)
+
+sc$CC.Difference <- sc$S.Score - sc$G2M.Score
+sc <- SCTransform(sc, vars.to.regress = "CC.Difference")
+
+sc <- FindVariableFeatures(sc, selection.method = "vst", nfeatures = 4000, assay = 'integrated')
+var_feat <- VariableFeatures(sc)
+var_regex <-  '^HLA-|^IG[HJKL]|^RNA|^MT|^RP'
+var_feat <- grep(var_regex, var_feat, invert=T, value=T)
+
+sc <- RunPCA(sc)
+sc <- RunUMAP(sc, reduction = "pca", dims = 1:30)
+dittoDimPlot(sc, reduction.use = "umap", 'source', size = 0.5) 
+DimPlot(sc, reduction = "umap", size = 0.5) 
+sc <- FindNeighbors(sc, dims = 1:30)
+sc <- FindClusters(sc, resolution = 2)
+dittoDimPlot(sc, reduction.use = "umap", 'source', size = 0.5) 
+dittoDimPlot(sc, reduction.use = "umap", 'seurat_clusters', size = 0.5) 
+#saveRDS(sc, paste0(WORKDIR, 'sc_integrate.rds'))
+#sc <- readRDS(paste0(WORKDIR, 'sc_integrate.rds'))
+```
+
+# Some useful plots for clusterization 
+```{r}
+#sc <- createBasicSC(raw, source)
+
+#Idents(object = sc_doubletdrop) <- "SCT_snn_res.1.8"
+#rm(raw)
+dittoDimPlot(sc, reduction.use = "umap", "seurat_clusters", size = 0.5) +
+  ggtitle('By clusters')
+
+dittoDimPlot(sc, reduction.use = "umap", "seurat_clusters",
+             size = 0.5, split.by = 'seurat_clusters') +
+  NoLegend()
+#sc <- readRDS(paste0(WORKDIR, 'levengberg_my19.rds'))
+#umap by samples
+p0 <- dittoDimPlot(sc, reduction.use = "umap", "source", size = 0.5) + 
+  ggtitle('By sample')
+p0
+
+dittoDimPlot(sc, reduction.use = "umap", var = "nFeature_RNA", size = 0.5) +
+  dittoDimPlot(sc, reduction.use = "umap", var = "nCount_RNA", size = 0.5) +
+  dittoDimPlot(sc, reduction.use = "umap", var = "percent.mt", size = 0.5)
+
+p1 <- dittoDimPlot(sc, reduction.use = "umap", "source",size = 0.5,split.by = 'source') +
+  ggtitle('By sample')
+p1
+```
+
+## Corrplot
+```{r}
+tbl <- table(sc$source, sc$seurat_clusters)
+
+corrplot(t(ceiling(100*t(tbl)/colSums(tbl))), is.corr=F,method = 'square', addCoef.col = 'black')
+```
+### Define clusters
+```{r}
+p3 <- dittoBarPlot(sc, "source", group.by = "seurat_clusters") +
+  ggtitle('')
+p3
+
+p3.1 <- dittoBarPlot(sc, "source", group.by = "seurat_clusters", scale='count') +
+  ggtitle('')
+p3.1
+
+p3.2 <- dittoBarPlot(sc, "seurat_clusters", group.by = "source", scale='count') +
+  ggtitle('')
+p3.2
+
+p3.3 <- dittoBarPlot(sc, "source", group.by = "seurat_clusters", scale='count') +
+  ggtitle('')
+p3.3
+```
+
+### Rename clusters
+```{r}
+new.cluster.ids <- c('0'='Myoblasts',
+                     '1'='Pericytes',
+                     '2'='Pericytes',
+                     '3'='Pericytes',
+                     '4'='Myoblasts',
+                     '5'='Pericytes',
+                     '6'='Myoblasts', 
+                     '7'='Myoblasts',
+                     '8'='Myoblasts',
+                     '9'='Myoblasts',
+                     '10'='Pericytes',
+                     '11'='Placenta',
+                     '12'='Myoblasts',
+                     '13'='Myoblasts', 
+                     '14'='Myoblasts', 
+                     '15'='Pericytes',
+                     '16'='Pericytes', 
+                     '17'='Placenta',
+                     '18'='Pericytes', ##????
+                     '19'='Myoblasts', 
+                     '20'='Myoblasts',
+                     '21'='Myoblasts',
+                     '22'='Pericytes',
+                     '23'='Myoblasts',
+                     '24'='Myoblasts',
+                     '25'='HUVEC',
+                     '26'='Myoblasts'
+                     
+                     
+)
+
+new.cluster.ids2 <- new.cluster.ids
+new.cluster.ids <- make.unique(new.cluster.ids)
+names(new.cluster.ids) <- levels(sc)
+sc <- RenameIdents(sc, new.cluster.ids)
+sc$idents <- sc@active.ident
+```
+
+
+### Plots
+```{r}
+p1 <- dittoDimPlot(sc, reduction.use = "umap", "source",size = 0.5,split.by = 'source') +
+  ggtitle('By sample')
+p1
+ggsave(paste0(PLOTSDIR, use.name,'.plot1.png'), width=8, height=7)
+
+p2 <- dittoDimPlot(sc, reduction.use = "umap", "idents", size = 0.5, split.by = 'source') +
+  ggtitle('By sample')
+p2
+ggsave(paste0(PLOTSDIR, use.name,'.plot2.png'), width=8, height=7)
+
+p2.1 <- dittoDimPlot(sc, reduction.use = "umap", "idents", size = 0.5, split.by = 'idents') +
+  ggtitle('By clusters') +
+  NoLegend()
+p2.1
+ggsave(paste0(PLOTSDIR, use.name,'.plot2.1.png'), width=8, height=7)
+
+p2.0 <- dittoDimPlot(sc, reduction.use = "umap", "idents", size = 0.5) +
+  ggtitle('By clusters')
+p2.0
+ggsave(paste0(PLOTSDIR, use.name,'.plot2.0.png'), width=7, height=7)
+```
+
+```{r}
+names(new.cluster.ids2) <- levels(sc)
+sc <- RenameIdents(sc, new.cluster.ids2)
+sc$idents2 <- sc@active.ident
+
+#saveRDS(sc, paste0(WORKDIR, 'levengberg_kate.rds'))
+
+p2.3 <- dittoDimPlot(sc, reduction.use = "umap", "idents2", size = 0.5) +
+  ggtitle('By clusters')
+p2.3
+ggsave(paste0(PLOTSDIR, use.name, '.plot2.3.png'), width=7, height=7)
+
+p2.4 <- dittoDimPlot(sc, reduction.use = "umap", "idents2", size = 0.5, split.by = 'source') +
+  ggtitle('By sample')
+p2.4
+ggsave(paste0(PLOTSDIR, use.name,'.plot2.4.png'), width=8, height=7)
+```
+
+## Distribution of cell types
+```{r}
+p3 <- dittoBarPlot(sc, "source", group.by = "idents") +
+  ggtitle('')
+p3
+ggsave(paste0(PLOTSDIR, use.name,'.bars1.png'), width=7, height=7)
+
+p3.1 <- dittoBarPlot(sc, "source", group.by = "idents", scale='count') +
+  ggtitle('')
+p3.1
+ggsave(paste0(PLOTSDIR, use.name,'.bars2.png'), width=7, height=7)
+
+p3.2 <- dittoBarPlot(sc, "idents", group.by = "source", scale='count') +
+  ggtitle('')
+p3.2
+ggsave(paste0(PLOTSDIR, use.name,'.bars3.png'), width=7, height=7)
+
+p3.3 <- dittoBarPlot(sc, "source", group.by = "idents", scale='count') +
+  ggtitle('')
+p3.3
+ggsave(paste0(PLOTSDIR, use.name,'.bars4.png'), width=7, height=7)
+```
+
+## Summary plot for clusterisation
+```{r}
+sc@active.ident <- sc$idents
+markers.cluster <- FindAllMarkers(sc, only.pos = TRUE, min.pct = 0.25,
+                                  min.diff.pct = 0.1, logfc.threshold = 0.25)
+top5 <- markers.cluster %>% 
+  group_by(cluster) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+p4 <- dittoDotPlot(sc, vars = unique(top5$gene), group.by = "idents", 
+                   max.color='blue', min.color='white') +
+  ylab('Clusters')
+p4
+ggsave(paste0(PLOTSDIR, use.name, '.plot4.png'), width=12, height=6)
+```
+
+```{r}
+plot_grid(plot_grid(p1, p2, labels = c('A', 'B')), 
+          plot_grid(p3, labels = c('C')), 
+          plot_grid(p4, labels = c('D')), nrow=3)
+ggsave(paste0(PLOTSDIR, use.name, '.figure1_сс.png'), width=12, height=14)
+
+plot_grid(plot_grid(p2.3, labels = c('A')), 
+          plot_grid(p2.4, labels = c('B')), nrow=2)
+ggsave(paste0(PLOTSDIR, use.name, '.figure2_сс.png'), width=10, height=14)
+
+saveRDS(sc, paste0(WORKDIR, 'sc_labeled_doubletdrop_cc.rds'))
+```
+
+
+# Myoblasts. Define types.
+```{r}
+sc <- readRDS(paste0(WORKDIR, 'sc_labeled_doubletdrop_cc.rds'))
+myoblasts <- subset(sc, idents = "Myoblasts")
+myoblasts$S.Score <- NULL
+myoblasts$G2M.Score <- NULL
+myoblasts$Phase <- NULL
+myoblasts$SCT_snn_res.1.5 <- NULL
+myoblasts$seurat_clusters <- NULL
+myoblasts$idents <- NULL
+myoblasts$idents2 <- NULL
+
+#myoblasts.list <- SplitObject(myoblasts, split.by = "source")
+
+```
+
+## Function
+```{r}
+runSeurat = function(sc, resolution) {
+  sc <- SCTransform(sc, residual.features = var_feat, verbose = FALSE)
+  sc <- RunPCA(sc)
+  #ElbowPlot(sc)
+  sc <- RunUMAP(sc, reduction = "pca", dims = 1:30)
+  sc <- FindNeighbors(sc, dims = 1:30)
+  sc <- FindClusters(sc, resolution = resolution)
+  sc
+}
+```
+
+#Integrate
+```{r}
+# plan("multisession", workers = CPU)
+# options(future.globals.maxSize = 2000 * 1024^2)
+# for (i in 1:length(myoblasts.list)) {
+#   myoblasts.list[[i]] <- SCTransform(myoblasts.list[[i]], verbose = FALSE)
+#   myoblasts.list[[i]] <- FindVariableFeatures(myoblasts.list[[i]], selection.method = "vst",
+#                                         nfeatures = 3000, verbose = T)
+#   }
+# 
+# features <- SelectIntegrationFeatures(object.list = myoblasts.list, nfeatures = 4000)
+# var_regex <-  '^HLA-|^IG[HJKL]|^RNA|^MT|^RP'
+# features <- grep(var_regex, features, invert=T, value=T)
+# myoblasts.list <- PrepSCTIntegration(object.list = myoblasts.list, anchor.features = features)
+# 
+# myo.integrate.anchors <- FindIntegrationAnchors(object.list = myoblasts.list, 
+#                                                 normalization.method = "SCT",
+#                                                 anchor.features = features)
+# myo.integrate <- IntegrateData(anchorset = myo.integrate.anchors, normalization.method = "SCT")
+```
+
+## Analysis
+```{r}
+VlnPlot(myoblasts, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.ribo"), ncol = 4)
+
+myoblasts <- FindVariableFeatures(myoblasts, selection.method = "vst", nfeatures = 4000, assay = 'SCT')
+var_feat <- VariableFeatures(myoblasts)
+var_regex <-  '^HLA-|^IG[HJKL]|^RNA|^MT|^RP'
+var_feat <- grep(var_regex, var_feat, invert=T, value=T)
+
+myoblasts <- RunPCA(myoblasts, verbose = FALSE, features = var_feat)
+myoblasts <- RunUMAP(myoblasts, reduction = "pca", dims = 1:30, verbose = FALSE)
+myoblasts <- FindNeighbors(myoblasts, reduction = "pca", dims = 1:30)
+myoblasts <- FindClusters(myoblasts, resolution = c(0, 0.1, 0.2, 0.4, 0.6, 0.8, 1, 1.2, 1.4, 1.6))
+clustree(myoblasts)
+
+dittoDimPlot(myoblasts, reduction.use = "umap", var = "nFeature_RNA", size = 0.5) +
+  dittoDimPlot(myoblasts, reduction.use = "umap", var = "nCount_RNA", size = 0.5) +
+  dittoDimPlot(myoblasts, reduction.use = "umap", var = "percent.mt", size = 0.5)
+
+dittoDimPlot(myoblasts, reduction.use = "umap", "seurat_clusters", size = 0.5) +
+  ggtitle('By clusters')
+
+dittoDimPlot(myoblasts, reduction.use = "umap", "source", size = 0.5, split.by = 'source') +
+  ggtitle('By sample')
+
+dittoDimPlot(myoblasts, reduction.use = "umap", "source", size = 0.5, split.by = 'seurat_clusters') +
+  ggtitle('Clusters by source')
+```
+## Elbow plot for clusters
+```{r}
+myoblasts.df <- myoblasts[['SCT']]$counts %>% 
+  as.data.frame()
+# Elbow method
+fviz_nbclust(myoblasts.df, kmeans, method = "wss") +
+    #geom_vline(xintercept = 4, linetype = 2)+
+  labs(subtitle = "Elbow method")
+```
+
+```{r}
+nb <- NbClust(myoblasts.df, distance = "euclidean", min.nc = 2,
+        max.nc = 10, method = "kmeans")
+
+fviz_nbclust(nb)
+```
+
+## Cell-cycle score
+```{r}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+myo.integrate <- CellCycleScoring(myo.integrate, s.features = s.genes, g2m.features = g2m.genes)
+
+dittoDimPlot(myo.integrate, reduction.use = "umap", "Phase", size = 0.5, split.by = 'Phase') +
+  ggtitle('By phase')
+```
+# DE
+```{r}
+Idents(myo.integrate) <- 'source'
+dittoDimPlot(myo.integrate, reduction.use = "umap", "source", size = 0.5) +
+     ggtitle('By clusters')
+plan("multisession", workers = 10)
+myo.integrate <- PrepSCTFindMarkers(myo.integrate)
+markers.myo.int <- FindAllMarkers(myo.integrate, only.pos = TRUE, min.pct = 0.25,
+                                  min.diff.pct = 0.1, logfc.threshold = 0.25, assay='SCT')
+top5 <- markers.myo.int %>% 
+  group_by(cluster) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+#DefaultAssay(myo.integrate) <- "SCT"
+
+dittoDotPlot(myo.integrate, vars = unique(top5$gene), group.by = "source", 
+                   max.color='blue', min.color='white') +
+  ylab('Clusters')
+```
+## Placenta
+```{r}
+myo.integrate$placenta <- gsub("Pl.My.Pr.Hu.1", "Placenta", myo.integrate$source)
+myo.integrate$placenta <- gsub("Pl.My.Hu", "Placenta", myo.integrate$placenta)
+myo.integrate$placenta <- gsub("My.Pr.Hu.1", "Non_placenta", myo.integrate$placenta)
+myo.integrate$placenta <- gsub("My.Hu", "Non_placenta", myo.integrate$placenta)
+
+Idents(myo.integrate) <- 'placenta'
+dittoDimPlot(myo.integrate, reduction.use = "umap", "integrated_snn_res.0.2", size = 0.5) +
+     ggtitle('By clusters')
+dittoDimPlot(myo.integrate, reduction.use = "umap", "placenta", size = 0.5) +
+     ggtitle('By placenta')
+plan("multisession", workers = 10)
+
+markers.placenta <- FindAllMarkers(myo.integrate, only.pos = TRUE, min.pct = 0.25,
+                                  min.diff.pct = 0.1, logfc.threshold = 0.25, assay='SCT')
+top5 <- markers.placenta %>% 
+  group_by(cluster) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+#DefaultAssay(myo.integrate) <- "SCT"
+
+dittoDotPlot(myo.integrate, vars = unique(top5$gene), group.by = "placenta", 
+                   max.color='blue', min.color='white') +
+  ylab('Clusters')
+```
+### Enrichment
+```{r}
+markers.by.entrezid <- select(org.Hs.eg.db, 
+       keys = markers.placenta$gene[markers.placenta$cluster == 'Placenta'],
+       columns = c("ENTREZID", "SYMBOL"),
+       keytype = "SYMBOL")
+
+ego <- enrichGO(markers.by.entrezid$ENTREZID, org.Hs.eg.db, ont = "ALL")
+dotplot(ego, split="ONTOLOGY", showCategory = 6, font.size = 7) + 
+  facet_grid(ONTOLOGY~., scale="free") +
+  ggtitle('Placenta')
+
+ekegg <- enrichKEGG(markers.by.entrezid$ENTREZID, organism = 'hsa', maxGSSize = 7000)
+cnetplot(ekegg) +
+  ggtitle('Placenta')
+
+markers.by.entrezid <- select(org.Hs.eg.db, 
+       keys = markers.placenta$gene[markers.placenta$cluster == 'Non_placenta'],
+       columns = c("ENTREZID", "SYMBOL"),
+       keytype = "SYMBOL")
+
+ego <- enrichGO(markers.by.entrezid$ENTREZID, org.Hs.eg.db, ont = "ALL")
+dotplot(ego, split="ONTOLOGY", showCategory = 6, font.size = 7) + 
+  facet_grid(ONTOLOGY~., scale="free") +
+  ggtitle('Non_placenta')
+
+ekegg <- enrichKEGG(markers.by.entrezid$ENTREZID, organism = 'hsa', maxGSSize = 7000)
+cnetplot(ekegg) +
+  ggtitle('Non_placenta')
+```
+## Perycites
+```{r}
+myo.integrate$pericytes <- gsub("Pl.My.Pr.Hu.1", "Pericytes", myo.integrate$source)
+myo.integrate$pericytes <- gsub("Pl.My.Hu", "Non_pericytes", myo.integrate$pericytes)
+myo.integrate$pericytes <- gsub("My.Pr.Hu.1", "Pericytes", myo.integrate$pericytes)
+myo.integrate$pericytes <- gsub("My.Hu", "Non_pericytes", myo.integrate$pericytes)
+
+Idents(myo.integrate) <- 'pericytes'
+dittoDimPlot(myo.integrate, reduction.use = "umap", "integrated_snn_res.0.2", size = 0.5) +
+     ggtitle('By clusters')
+dittoDimPlot(myo.integrate, reduction.use = "umap", "pericytes", size = 0.5) +
+     ggtitle('By pericytes')
+plan("multisession", workers = 10)
+
+markers.pericytes <- FindAllMarkers(myo.integrate, only.pos = TRUE, min.pct = 0.25,
+                                  min.diff.pct = 0.1, logfc.threshold = 0.25, assay='SCT')
+top5 <- markers.pericytes %>% 
+  group_by(cluster) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+#DefaultAssay(myo.integrate) <- "SCT"
+
+dittoDotPlot(myo.integrate, vars = unique(top5$gene), group.by = "pericytes", 
+                   max.color='blue', min.color='white') 
+```
+
+### Enrichment
+```{r}
+markers.by.entrezid <- select(org.Hs.eg.db, 
+       keys = markers.pericytes$gene[markers.pericytes$cluster == 'Pericytes'],
+       columns = c("ENTREZID", "SYMBOL"),
+       keytype = "SYMBOL")
+
+ego <- enrichGO(markers.by.entrezid$ENTREZID, org.Hs.eg.db, ont = "ALL")
+dotplot(ego, split="ONTOLOGY", showCategory = 6, font.size = 7) + 
+  facet_grid(ONTOLOGY~., scale="free") +
+  ggtitle('Pericytes')
+
+ekegg <- enrichKEGG(markers.by.entrezid$ENTREZID, organism = 'hsa', maxGSSize = 7000)
+cnetplot(ekegg) +
+  ggtitle('Pericytes')
+
+markers.by.entrezid <- select(org.Hs.eg.db, 
+       keys = markers.pericytes$gene[markers.pericytes$cluster == 'Non_pericytes'],
+       columns = c("ENTREZID", "SYMBOL"),
+       keytype = "SYMBOL")
+
+ego <- enrichGO(markers.by.entrezid$ENTREZID, org.Hs.eg.db, ont = "ALL")
+dotplot(ego, split="ONTOLOGY", showCategory = 6, font.size = 7) + 
+  facet_grid(ONTOLOGY~., scale="free") +
+  ggtitle('Non_pericytes')
+
+ekegg <- enrichKEGG(markers.by.entrezid$ENTREZID, organism = 'hsa', maxGSSize = 7000)
+cnetplot(ekegg) +
+  ggtitle('Non_pericytes')
+```
+
+# Check markers of myo
+```{r}
+FeaturePlot(myo.integrate, features = c(#"PAX3", "TTN", "MYF5", "MYH4", "MYOG", 
+                                        #"MYH2", "MYH1", "DMD", "PXN", "CDKN1A",
+                                        #"ACTA2", "NEB", "MB", "DES", "TNNI1", "TP63",
+                                        #"RYR1", "MYH11", 
+                                        "MYL9", "RGS5", "MYLK", "HHIP", "MYH11"),
+                                        #"PERGL", "PLN"), 
+            cols = c("grey", "red"))
+```
+
+# Enrichment analysis
+```{r}
+markers.by.entrezid <- select(org.Hs.eg.db, 
+       keys = markers.myo.int$gene[markers.myo.int$cluster == '1'],
+       columns = c("ENTREZID", "SYMBOL"),
+       keytype = "SYMBOL")
+
+ego <- enrichGO(markers.by.entrezid$ENTREZID, org.Hs.eg.db, ont = "ALL")
+dotplot(ego, split="ONTOLOGY", showCategory = 15, font.size = 8) + 
+  facet_grid(ONTOLOGY~., scale="free")
+
+ekegg <- enrichKEGG(markers.by.entrezid$ENTREZID, organism = 'hsa', maxGSSize = 7000)
+cnetplot(ekegg)
+```
+
+
+# Analysis
+```{r}
+myoblasts <- subset(myoblasts, subset = percent.mt < 8 & percent.ribo > 10)
+VlnPlot(myoblasts, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.ribo"), ncol = 4)
+
+
+myoblasts <- NormalizeData(myoblasts, assay = 'RNA')
+myoblasts <- FindVariableFeatures(myoblasts, selection.method = "vst", nfeatures = 4000, assay = 'RNA')
+var_feat <- VariableFeatures(myoblasts)
+var_regex <-  '^HLA-|^IG[HJKL]|^RNA|^MT|^RP'
+var_feat <- grep(var_regex, var_feat, invert=T, value=T)
+```
+
+
+## Re-clustering 
+```{r}
+myoblasts <- runSeurat(myoblasts, resolution = 0.8)
+#saveRDS(sc, paste0(WORKDIR, 'myoblasts.rds'))
+#myoblasts <- readRDS(paste0(WORKDIR, 'myoblasts.rds'))
+myoblasts <- SCTransform(myoblasts, residual.features = var_feat, vst.flavor = "v2")
+myoblasts <- RunPCA(myoblasts, npcs = 30, verbose = FALSE)
+
+# one-liner to run Integration
+myoblasts <- IntegrateLayers(object = myoblasts, method = HarmonyIntegration,
+                       orig.reduction = "pca", new.reduction = 'harmony',
+                       assay = "SCT", verbose = FALSE)
+
+# re-join layers after integration
+myoblasts[["RNA"]] <- JoinLayers(myoblasts[["RNA"]])
+
+myoblasts <- FindNeighbors(myoblasts, reduction = "integrated.cca", dims = 1:30)
+myoblasts <- FindClusters(ifnb, resolution = 0.8)
+
+dittoDimPlot(myoblasts, reduction.use = "umap", var = "nFeature_RNA", size = 0.5) +
+  dittoDimPlot(myoblasts, reduction.use = "umap", var = "nCount_RNA", size = 0.5) +
+  dittoDimPlot(myoblasts, reduction.use = "umap", var = "percent.mt", size = 0.5)
+
+dittoDimPlot(myoblasts, reduction.use = "umap", "seurat_clusters", size = 0.5) +
+  ggtitle('By clusters')
+
+dittoDimPlot(myoblasts, reduction.use = "umap", "source", size = 0.5, split.by = 'source') +
+  ggtitle('By sample')
+
+dittoDimPlot(myoblasts, reduction.use = "umap", "source", size = 0.5, split.by = 'seurat_clusters') +
+  ggtitle('Clusters by source')
+```
+
+
+## Cell-cycle score
+```{r}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+myoblasts <- CellCycleScoring(myoblasts, s.features = s.genes, g2m.features = g2m.genes)
+
+assay = "RNA",
+  new.assay.name = "SCT",
+
+dittoDimPlot(myoblasts, reduction.use = "umap", "Phase", size = 0.5, split.by = 'seurat_clusters') +
+  ggtitle('By clusters')
+
+dittoDimPlot(myoblasts, reduction.use = "umap", "Phase", size = 0.5, split.by = 'Phase') +
+  ggtitle('By phase')
+```
+## SingleR
+### Reference
+```{r}
+ref.data <- HumanPrimaryCellAtlasData()
+```
+
+```{r}
+myoblasts_singler_by_cells <- SingleR(GetAssayData(myoblasts, assay = 'RNA'), 
+                               ref=ref.data, labels=ref.data$label.main,
+                               de.method='wilcox', de.n=25,
+                               BPPARAM=MulticoreParam(CPU))
+                               
+head(sort(table(myoblasts_singler_by_cells$labels), decreasing=TRUE), 10)
+myoblasts_singler_by_clusters <- SingleR(test = GetAssayData(myoblasts, assay = 'RNA'),
+                           ref = ref.data,
+                           labels = ref.data$label.main,
+                           clusters = myoblasts$SCT_snn_res.0.8
+)
+
+head(sort(table(myoblasts_singler_by_clusters$labels), decreasing=TRUE), 10)
+```
+
+## DE
+```{r}
+markers.myoblasts <- FindAllMarkers(myoblasts, only.pos = TRUE, min.pct = 0.25,
+                                  min.diff.pct = 0.1, logfc.threshold = 0.25)
+top5 <- markers.myoblasts %>% 
+  group_by(cluster) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+dittoDotPlot(myoblasts, vars = unique(top5$gene), group.by = "seurat_clusters", 
+                   max.color='blue', min.color='white') +
+  ylab('Clusters')
+```
+0 - cancer maybe?
+High expression of MT-genes
+LRRC75A may be a useful biomarker to identify cell subpopulations that contribute to the angiogenic effects of BM-MSCs (bone marrow-derived MSCs mesenchymal stromal/stem cells) - https://academic.oup.com/stcltm/article/12/6/379/7177383
+EGR1 - EGR1 is closely related to the initiation and progression of cancer and may participate in tumor cell proliferation, invasion, and metastasis and in tumor angiogenesis (https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8024650/)
+
+1- 
+APOE - satellite cells based on myoatlas (https://research.cchmc.org/myoatlas/)
+H19 - tumor supressor
+SFRP2 - important TF in myogenesis
+CCL2 - In conclusion, CCL2 positively affects myogenesis by CCR2 via AKT-mTOR signaling pathways. (https://pubmed.ncbi.nlm.nih.gov/36575043/)
+STMN2 - Stathmin proteins function in microtubule dynamics and signal transduction (in neurons?)
+
+2 - fibroblast/endothelial cells ??
+RARRES2 -  receptor of fibroblast/endothelial cells
+DPT - Dermatopontin is an extracellular matrix protein with possible functions in cell-matrix interactions and matrix assembly. fibroblasts/tenocytes based on myoatlas
+PDGFD - Growth factor that plays an essential role in the regulation of embryonic development, cell proliferation, cell migration, survival and chemotaxis. Potent mitogen for cells of mesenchymal origin. fibroblasts/tenocytes/EC based on myoatlas
+PLXDC2 - receptor
+
+3 - muscle ?
+ARHGEF28 - 
+CDH4 - satellite cells based on myoatlas (https://research.cchmc.org/myoatlas/) Based on studies in chicken and mouse, this cadherin is thought to play an important role during brain segmentation and neuronal outgrowth. In addition, a role in kidney and muscle development is indicated.
+SLC7A2 - sk muscle based on myoatlas
+TOX - immune gene
+MYPN - Striated muscle in vertebrates comprises large proteins which must be organized properly to contract efficiently. Z-lines in striated muscle are a sign of this organization, representing the ends of actin thin filaments, titin, nebulin or nebulette and accessory proteins required for structure and function. 
+
+4 - 
+LRRC75A may be a useful biomarker to identify cell subpopulations that contribute to the angiogenic effects of BM-MSCs (bone marrow-derived MSCs mesenchymal stromal/stem cells) - https://academic.oup.com/stcltm/article/12/6/379/7177383
+RANBP17 - nuclear transport receptor
+KCNQ1OT1 - satellite cells based on myoatlas (https://research.cchmc.org/myoatlas/)
+
+5. -
+
+
+
+
+MIR31HG - This transcript may be involved in cellular pluripotency and regulate the differentiation of myoblasts and other tissues.
+
+
+SLC7A2 - sk muscle based on myoatlas
+ADGRL3 - 
+
+5 - 
+
+### Markers
+satellite cells 
+```{r}
+VlnPlot(myoblasts, features = "PAX7", layer = 'counts')
+```
+fibroblasts
+```{r}
+VlnPlot(myoblasts, features = c('COL1A2', 'COL3A1', 'FAP', 'DCN', 'TCF7L2', 'PDGFRA'))
+```
+tenocytes
+```{r}
+VlnPlot(myoblasts, features = c('COMP', 'MKX'))
+```
+smooth muscle
+```{r}
+VlnPlot(myoblasts, features = c('ACTA2', 'MYH11', 'RGS5'))
+```
+EC
+```{r}
+VlnPlot(myoblasts, features = c('VWF', 'PECAM1'))
+```
+MYH7
+```{r}
+VlnPlot(myoblasts, features = c('MYH1'))
+```
+
+```{r}
+cds <- as.cell_data_set(myoblasts)
+cds <- cluster_cells(cds, resolution=1e-2)
+```
+
+# Dendrogram of the clusters
+```{r}
+
+
+sc <- BuildClusterTree(
+  sc,
+  dims = 1:15,
+  reorder = FALSE,
+  reorder.numeric = FALSE
+)
+tree <- sc@tools$BuildClusterTree
+tree$tip.label <- paste0("Cluster ", tree$tip.label)
+ggtree::ggtree(tree, aes(x, y)) +
+  scale_y_reverse() +
+  ggtree::geom_tree() +
+  ggtree::theme_tree() +
+  ggtree::geom_tiplab(offset = 1) +
+  ggtree::geom_tippoint(color=sample(colors(), length(tree$tip.label)), shape = 16, size = 5) +
+  coord_cartesian(clip = 'off') +
+  theme(plot.margin = unit(c(0,2.5,0,0), 'cm'))
+
+sample(colors(), length(tree$tip.label))
+```
+
+```{r}
+sc <- BuildClusterTree(
+  sc,
+  dims = 1:15,
+  reorder = FALSE,
+  reorder.numeric = FALSE
+)
+tree <- sc@tools$BuildClusterTree
+tree$tip.label <- paste0("Cluster ", tree$tip.label)
+ggtree::ggtree(tree, aes(x, y)) +
+  scale_y_reverse() +
+  ggtree::geom_tree() +
+  ggtree::theme_tree() +
+  ggtree::geom_tiplab(offset = 1) +
+  ggtree::geom_tippoint(color=sample(colors(), length(tree$tip.label)), shape = 16, size = 5) +
+  coord_cartesian(clip = 'off') +
+  theme(plot.margin = unit(c(0,2.5,0,0), 'cm'))
+```
+
+# Pericytes. Define types.
+```{r}
+pericytes <- subset(sc, idents = 'Pericytes')
+pericytes <- runSeurat(pericytes, resolution = 0.5)
+#saveRDS(sc, paste0(WORKDIR, 'pericytes.rds'))
+#pericytes <- readRDS(paste0(WORKDIR, 'pericytes.rds'))
+
+dittoDimPlot(pericytes, reduction.use = "umap", "seurat_clusters", size = 0.5) +
+  ggtitle('By clusters')
+
+dittoDimPlot(pericytes, reduction.use = "umap", "source", size = 0.5, split.by = 'source') +
+  ggtitle('By sample')
+```
+
+# DoubletFinder fix
+```{r}
+paramSweep_v3_Seurat5 <- function (seu, PCs = 1:10, sct = FALSE, num.cores = 1) 
+{
+    require(Seurat)
+    require(fields)
+    pK <- c(5e-04, 0.001, 0.005, seq(0.01, 0.3, by = 0.01))
+    pN <- seq(0.05, 0.3, by = 0.05)
+    min.cells <- round(nrow(seu@meta.data)/(1 - 0.05) - nrow(seu@meta.data))
+    pK.test <- round(pK * min.cells)
+    pK <- pK[which(pK.test >= 1)]
+    orig.commands <- seu@commands
+    if (nrow(seu@meta.data) > 10000) {
+        real.cells <- rownames(seu@meta.data)[sample(1:nrow(seu@meta.data), 
+            10000, replace = FALSE)]
+        data <- seu@assays$RNA$counts[, real.cells]
+        n.real.cells <- ncol(data)
+    }
+    if (nrow(seu@meta.data) <= 10000) {
+        real.cells <- rownames(seu@meta.data)
+        data <- seu@assays$RNA$counts
+        n.real.cells <- ncol(data)
+    }
+    if (num.cores > 1) {
+        require(parallel)
+        cl <- makeCluster(num.cores)
+        output2 <- mclapply(as.list(1:length(pN)), FUN = parallel_paramSweep_v3, 
+            n.real.cells, real.cells, pK, pN, data, orig.commands, 
+            PCs, sct, mc.cores = num.cores)
+        stopCluster(cl)
+    }
+    else {
+        output2 <- lapply(as.list(1:length(pN)), FUN = parallel_paramSweep_v3, 
+            n.real.cells, real.cells, pK, pN, data, orig.commands, 
+            PCs, sct)
+    }
+    sweep.res.list <- list()
+    list.ind <- 0
+    for (i in 1:length(output2)) {
+        for (j in 1:length(output2[[i]])) {
+            list.ind <- list.ind + 1
+            sweep.res.list[[list.ind]] <- output2[[i]][[j]]
+        }
+    }
+    name.vec <- NULL
+    for (j in 1:length(pN)) {
+        name.vec <- c(name.vec, paste("pN", pN[j], "pK", pK, 
+            sep = "_"))
+    }
+    names(sweep.res.list) <- name.vec
+    return(sweep.res.list)
+}
+
+
+
+
+doubletFinder_v3_SeuratV5 <- function (seu, PCs, pN = 0.25, pK, nExp, reuse.pANN = FALSE, 
+          sct = FALSE, annotations = NULL) 
+{
+  require(Seurat)
+  require(fields)
+  require(KernSmooth)
+  if (reuse.pANN != FALSE) {
+    pANN.old <- seu@meta.data[, reuse.pANN]
+    classifications <- rep("Singlet", length(pANN.old))
+    classifications[order(pANN.old, decreasing = TRUE)[1:nExp]] <- "Doublet"
+    seu@meta.data[, paste("DF.classifications", pN, pK, nExp, 
+                          sep = "_")] <- classifications
+    return(seu)
+  }
+  if (reuse.pANN == FALSE) {
+    real.cells <- rownames(seu@meta.data)
+    data <- seu@assays$RNA$counts[, real.cells]
+    n_real.cells <- length(real.cells)
+    n_doublets <- round(n_real.cells/(1 - pN) - n_real.cells)
+    print(paste("Creating", n_doublets, "artificial doublets...", 
+                sep = " "))
+    real.cells1 <- sample(real.cells, n_doublets, replace = TRUE)
+    real.cells2 <- sample(real.cells, n_doublets, replace = TRUE)
+    doublets <- (data[, real.cells1] + data[, real.cells2])/2
+    colnames(doublets) <- paste("X", 1:n_doublets, sep = "")
+    data_wdoublets <- cbind(data, doublets)
+    if (!is.null(annotations)) {
+      stopifnot(typeof(annotations) == "character")
+      stopifnot(length(annotations) == length(Cells(seu)))
+      stopifnot(!any(is.na(annotations)))
+      annotations <- factor(annotations)
+      names(annotations) <- Cells(seu)
+      doublet_types1 <- annotations[real.cells1]
+      doublet_types2 <- annotations[real.cells2]
+    }
+    orig.commands <- seu@commands
+    if (sct == FALSE) {
+      print("Creating Seurat object...")
+      seu_wdoublets <- CreateSeuratObject(counts = data_wdoublets)
+      print("Normalizing Seurat object...")
+      seu_wdoublets <- NormalizeData(seu_wdoublets, normalization.method = orig.commands$NormalizeData.RNA@params$normalization.method, 
+                                     scale.factor = orig.commands$NormalizeData.RNA@params$scale.factor, 
+                                     margin = orig.commands$NormalizeData.RNA@params$margin)
+      print("Finding variable genes...")
+      seu_wdoublets <- FindVariableFeatures(seu_wdoublets, 
+                                            selection.method = orig.commands$FindVariableFeatures.RNA$selection.method, 
+                                            loess.span = orig.commands$FindVariableFeatures.RNA$loess.span, 
+                                            clip.max = orig.commands$FindVariableFeatures.RNA$clip.max, 
+                                            mean.function = orig.commands$FindVariableFeatures.RNA$mean.function, 
+                                            dispersion.function = orig.commands$FindVariableFeatures.RNA$dispersion.function, 
+                                            num.bin = orig.commands$FindVariableFeatures.RNA$num.bin, 
+                                            binning.method = orig.commands$FindVariableFeatures.RNA$binning.method, 
+                                            nfeatures = orig.commands$FindVariableFeatures.RNA$nfeatures, 
+                                            mean.cutoff = orig.commands$FindVariableFeatures.RNA$mean.cutoff, 
+                                            dispersion.cutoff = orig.commands$FindVariableFeatures.RNA$dispersion.cutoff)
+      print("Scaling data...")
+      seu_wdoublets <- ScaleData(seu_wdoublets, features = orig.commands$ScaleData.RNA$features, 
+                                 model.use = orig.commands$ScaleData.RNA$model.use, 
+                                 do.scale = orig.commands$ScaleData.RNA$do.scale, 
+                                 do.center = orig.commands$ScaleData.RNA$do.center, 
+                                 scale.max = orig.commands$ScaleData.RNA$scale.max, 
+                                 block.size = orig.commands$ScaleData.RNA$block.size, 
+                                 min.cells.to.block = orig.commands$ScaleData.RNA$min.cells.to.block)
+      print("Running PCA...")
+      seu_wdoublets <- RunPCA(seu_wdoublets, features = orig.commands$ScaleData.RNA$features, 
+                              npcs = length(PCs), rev.pca = orig.commands$RunPCA.RNA$rev.pca, 
+                              weight.by.var = orig.commands$RunPCA.RNA$weight.by.var, 
+                              verbose = FALSE)
+      pca.coord <- seu_wdoublets@reductions$pca@cell.embeddings[, 
+                                                                PCs]
+      cell.names <- rownames(seu_wdoublets@meta.data)
+      nCells <- length(cell.names)
+      rm(seu_wdoublets)
+      gc()
+    }
+    if (sct == TRUE) {
+      require(sctransform)
+      print("Creating Seurat object...")
+      seu_wdoublets <- CreateSeuratObject(counts = data_wdoublets)
+      print("Running SCTransform...")
+      seu_wdoublets <- SCTransform(seu_wdoublets)
+      print("Running PCA...")
+      seu_wdoublets <- RunPCA(seu_wdoublets, npcs = length(PCs))
+      pca.coord <- seu_wdoublets@reductions$pca@cell.embeddings[, 
+                                                                PCs]
+      cell.names <- rownames(seu_wdoublets@meta.data)
+      nCells <- length(cell.names)
+      rm(seu_wdoublets)
+      gc()
+    }
+    print("Calculating PC distance matrix...")
+    dist.mat <- fields::rdist(pca.coord)
+    print("Computing pANN...")
+    pANN <- as.data.frame(matrix(0L, nrow = n_real.cells, 
+                                 ncol = 1))
+    if (!is.null(annotations)) {
+      neighbor_types <- as.data.frame(matrix(0L, nrow = n_real.cells, 
+                                             ncol = length(levels(doublet_types1))))
+    }
+    rownames(pANN) <- real.cells
+    colnames(pANN) <- "pANN"
+    k <- round(nCells * pK)
+    for (i in 1:n_real.cells) {
+      neighbors <- order(dist.mat[, i])
+      neighbors <- neighbors[2:(k + 1)]
+      pANN$pANN[i] <- length(which(neighbors > n_real.cells))/k
+      if (!is.null(annotations)) {
+        for (ct in unique(annotations)) {
+          neighbor_types[i, ] <- table(doublet_types1[neighbors - 
+                                                        n_real.cells]) + table(doublet_types2[neighbors - 
+                                                                                                n_real.cells])
+          neighbor_types[i, ] <- neighbor_types[i, ]/sum(neighbor_types[i, 
+          ])
+        }
+      }
+    }
+    print("Classifying doublets..")
+    classifications <- rep("Singlet", n_real.cells)
+    classifications[order(pANN$pANN[1:n_real.cells], decreasing = TRUE)[1:nExp]] <- "Doublet"
+    seu@meta.data[, paste("pANN", pN, pK, nExp, sep = "_")] <- pANN[rownames(seu@meta.data), 
+                                                                    1]
+    seu@meta.data[, paste("DF.classifications", pN, pK, nExp, 
+                          sep = "_")] <- classifications
+    if (!is.null(annotations)) {
+      colnames(neighbor_types) = levels(doublet_types1)
+      for (ct in levels(doublet_types1)) {
+        seu@meta.data[, paste("DF.doublet.contributors", 
+                              pN, pK, nExp, ct, sep = "_")] <- neighbor_types[, 
+                                                                              ct]
+      }
+    }
+    return(seu)
+  }
+}
+
+
+```
+

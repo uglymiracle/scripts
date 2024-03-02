@@ -1,0 +1,2172 @@
+---
+title: "Full_analysis"
+output:
+  html_document: default
+  pdf_document: default
+date: "2024-01-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+if (!requireNamespace("dittoSeq", quietly = TRUE)) BiocManager::install("dittoSeq")
+library(dittoSeq)
+if (!requireNamespace("celldex", quietly = TRUE)) BiocManager::install("celldex")
+library(celldex)
+if (!requireNamespace("devtools", quietly = TRUE)) install.packages("devtools")
+if (!requireNamespace("DoubletFinder", quietly = TRUE))  remotes::install_github('chris-mcginnis-ucsf/DoubletFinder')
+library(DoubletFinder)
+if (!requireNamespace("cowplot", quietly = TRUE)) install.packages("cowplot")
+library(cowplot)
+if (!requireNamespace("corrplot", quietly = TRUE)) install.packages("corrplot")
+library(corrplot)
+if (!requireNamespace("ggtree", quietly = TRUE)) BiocManager::install("ggtree")
+library(ggtree)
+if (!requireNamespace("SingleR", quietly = TRUE)) BiocManager::install("SingleR")
+library(SingleR)
+if (!requireNamespace("Seurat", quietly = TRUE)) install.packages("Seurat")
+library(Seurat)
+if (!requireNamespace("clusterProfiler", quietly = TRUE)) BiocManager::install("clusterProfiler")
+library(clusterProfiler)
+if (!requireNamespace("plyr", quietly = TRUE)) install.packages("plyr")
+library(plyr)
+if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
+library(dplyr)
+library(scuttle)
+library("BiocParallel")
+library(future)
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) BiocManager::install("org.Hs.eg.db")
+library(org.Hs.eg.db)
+if (!requireNamespace("escape", quietly = TRUE)) BiocManager::install("escape")
+library(escape)
+library(rstatix)
+library(ggpubr)
+if (!requireNamespace("clustree", quietly = TRUE)) install.packages('clustree')
+library(clustree)
+library(stringr)
+if (!requireNamespace("scDblFinder", quietly = TRUE)) BiocManager::install("scDblFinder")
+library(scDblFinder)
+if (!requireNamespace("slingshot", quietly = TRUE)) BiocManager::install("kstreet13/slingshot")
+library(slingshot)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+###################################################################################
+WORKDIR <- '~/levenberg/'
+PLOTSDIR <- '~/levenberg/plots/'
+use.name <- 'Full'
+
+set.seed(555)
+
+CPU <- 8
+###################################################################################
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+my_colors <- c("#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#32CD32FF",  "#F08080FF",
+               "#9ACD32FF", "#4682B4FF",
+               "#40E0D0FF",  "#F0E68CFF", "#D2B48CFF", "#8FBC8BFF", 
+               "#DDA0DDFF", "#5F9EA0FF", "#FFDAB9FF", "#FFA07AFF", "#87CEEBFF")
+
+plot_theme = theme_classic(base_size=12, base_family = 'Helvetica') + 
+             theme(plot.title = element_text(size = 14, face = 'bold')
+                   )
+
+label_change <- function(input_string) {
+  modified_string <- gsub("_", " ", input_string)
+  return(modified_string)
+}
+```
+
+# Preprocessing
+
+```{r read data, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+sc1 <- Read10X_h5(paste0(WORKDIR, 'new_data/filtered_feature_bc_matrix_SL111_old.h5'))
+sc2 <- Read10X_h5(paste0(WORKDIR, 'new_data/filtered_feature_bc_matrix_SL112_old.h5'))
+sc3 <- Read10X_h5(paste0(WORKDIR, 'new_data/filtered_feature_bc_matrix_SL161.h5'))
+sc4 <- Read10X_h5(paste0(WORKDIR, 'new_data/filtered_feature_bc_matrix_SL162.h5'))
+sc5 <- Read10X_h5(paste0(WORKDIR, 'new_data/filtered_feature_bc_matrix_SL111.h5'))
+sc6 <- Read10X_h5(paste0(WORKDIR, 'new_data/filtered_feature_bc_matrix_SL112.h5'))
+
+sc1 <- sc1[,intersect(colnames(sc1), colnames(sc5))]+sc5[,intersect(colnames(sc1), colnames(sc5))]
+sc2 <- sc2[,intersect(colnames(sc2), colnames(sc6))]+sc6[,intersect(colnames(sc2), colnames(sc6))]
+
+rm(sc5, sc6)
+```
+
+```{r combine data, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+N = 15000
+raw <- cbind(sc1,
+             sc2,
+             sc3[,sample(ncol(sc3),N)],
+             sc4[,sample(ncol(sc4),N)])
+
+colnames(raw) = make.unique(colnames(raw))
+
+source <- c(rep('Pl.My.Pr.Hu', ncol(sc1)), #Myocytes + Pericytes + HUVEC + Placenta (batch1+2)
+            rep('My.Pr.Hu', ncol(sc2)), #Myocytes + Pericytes + HUVEC (batch1+2)
+            rep('My.Hu',N), #Myocytes + HUVEC
+            rep('Pl.My.Hu',N)) #Myocytes + HUVEC + Placenta
+```
+
+```{r seurat preprocessing, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+sc <- CreateSeuratObject(raw, project = "muscle", min.cells = 10, min.features = 200)
+names(source) <- colnames(sc)
+sc$source <- source[colnames(sc)]
+sc[["percent.mt"]] <- PercentageFeatureSet(sc, pattern = "^MT-")
+sc[["percent.ribo"]] <- PercentageFeatureSet(sc, pattern = "^RP[SL]")
+sc[["complexity"]] <- log10(sc$nFeature_RNA) / log10(sc$nCount_RNA)
+
+sc <- subset(sc, subset = percent.mt < 10 & percent.ribo > 10 & complexity > 0.8 & nFeature_RNA < 4000)
+
+sc <- SCTransform(sc)
+sc <- RunPCA(sc)
+sc <- RunUMAP(sc, reduction = "pca", dims = 1:30)
+sc <- FindNeighbors(sc, dims = 1:30)
+sc <- FindClusters(sc, resolution = 1)
+
+
+dittoDimPlot(sc, reduction.use = "umap", 'source', size = 0.5) 
+dittoDimPlot(sc, reduction.use = "umap", 'seurat_clusters', size = 0.5) 
+saveRDS(sc, paste0(WORKDIR, use.name, '.sc.rds'))
+```
+
+```{r define clusters, message=FALSE, warning=FALSE, include=FALSE}
+sc <- readRDS(paste0(WORKDIR, use.name, '.sc.rds'))
+
+dittoBarPlot(sc, "source", group.by = "seurat_clusters") +
+  ggtitle('')
+
+dittoBarPlot(sc, "source", group.by = "seurat_clusters", scale='count') +
+  ggtitle('')
+
+new.cluster.ids <- c('0'='Pericytes',
+                     '1'='Fibroblasts',
+                     '2'='Fibroblasts',
+                     '3'='Fibroblasts',
+                     '4'='Pericytes',
+                     '5'='Fibroblasts', #maybe myo
+                     '6'='Pericytes', 
+                     '7'='Placenta',
+                     '8'='Fibroblasts',
+                     '9'='Fibroblasts',
+                     '10'='Placenta',
+                     '11'='Pericytes',
+                     '12'='Fibroblasts',
+                     '13'='Pericytes', 
+                     '14'='Pericytes', 
+                     '15'='Pericytes',
+                     '16'='Fibroblasts', 
+                     '17'='Pericytes',
+                     '18'='Fibroblasts',
+                     '19'='Fibroblasts', 
+                     '20'='Fibroblasts',
+                     '21'='Fibroblasts',
+                     '22'='Fibroblasts',
+                     '23'='HUVEC')
+
+new.cluster.ids2 <- new.cluster.ids
+new.cluster.ids <- make.unique(new.cluster.ids)
+names(new.cluster.ids) <- levels(sc)
+sc <- RenameIdents(sc, new.cluster.ids)
+sc$idents <- sc@active.ident
+```
+
+All the cells were annotated. If the cells from the cluster are represented only by cells from the placenta samples, then we assumed that these were placental cells. If the cells from the cluster are represented only by cells from samples with pericytes, then we assumed that these are pericytes. Endothelial cells are represented by cells from all 4 samples and are located furthest away on the UMAP. The remaining cells are considered fibroblasts.
+
+```{r plots for preprocessing part 1, echo=FALSE, fig.height=14, fig.width=12, message=FALSE, warning=FALSE}
+p1 <- dittoDimPlot(sc, reduction.use = "umap", "source",size = 0.5,split.by = 'source') +
+  ggtitle('By sample')
+
+p2 <- dittoDimPlot(sc, reduction.use = "umap", "idents", size = 0.5, split.by = 'source') +
+  ggtitle('By sample')
+
+names(new.cluster.ids2) <- levels(sc)
+sc <- RenameIdents(sc, new.cluster.ids2)
+sc$idents2 <- sc@active.ident
+
+p2.3 <- dittoDimPlot(sc, reduction.use = "umap", "idents2", size = 0.5) +
+  ggtitle('By clusters')
+
+p2.4 <- dittoDimPlot(sc, reduction.use = "umap", "idents2", size = 0.5, split.by = 'source') +
+  ggtitle('By sample')
+
+p3 <- dittoBarPlot(sc, "source", group.by = "idents") +
+  ggtitle('')
+
+sc@active.ident <- sc$idents2
+markers.cluster <- FindAllMarkers(sc, only.pos = TRUE, min.pct = 0.25,
+                                  min.diff.pct = 0.1, logfc.threshold = 0.25)
+top4 <- markers.cluster %>% 
+  group_by(cluster) %>% 
+  top_n(n = 4, wt = avg_log2FC)
+p4 <- dittoDotPlot(sc, vars = unique(top4$gene), group.by = "idents2", 
+                   max.color='blue', min.color='white') +
+  ylab('Clusters')
+
+plot_grid(plot_grid(p1, p2, labels = c('A', 'B')), 
+          plot_grid(p3, labels = c('C')), 
+          plot_grid(p4, labels = c('D')), nrow=3)
+# ggsave(paste0(PLOTSDIR, use.name, '.figure1.png'), width=14, height=14)
+```
+
+```{r plots for preprocessing part 2, echo=FALSE, fig.height=10, fig.width=7, message=FALSE, warning=FALSE}
+plot_grid(plot_grid(p2.3, labels = c('A')), 
+          plot_grid(p2.4, labels = c('B')), nrow=2)
+# ggsave(paste0(PLOTSDIR, use.name, '.figure2.png'), width=7, height=10)
+```
+
+We tried to use tdTomato expression in order to explicitly separate fibroblasts and pericytes. Since we assume that fibroblasts were transfected by the plasmid with tdTomato as well as muscle cells. However, this did not really allow us to distinguish cells. We do not observe a clear localization of tdTomato on UMAP.
+
+```{r tdTomato, echo=FALSE, fig.height=4, fig.width=6, message=FALSE, warning=FALSE}
+Idents(sc) <- "idents"
+
+a <- DotPlot(object = sc, features = 'tdTomato', cols = c(my_colors, 'blue', 'red', 'yellow', 'green', 'lightblue', 'pink', 'orange', 'purple'))
+# a$data
+ggplot(a$data, aes(x=reorder(id, -pct.exp), id, y=pct.exp, fill=id)) +
+  geom_col() +
+  xlab("Cluster") +
+  ylab('Percent of cells with tdTomato') +
+  plot_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+  NoLegend() 
+```
+
+```{r tdTomato umap, echo=FALSE, fig.height=4, fig.width=6, message=FALSE, warning=FALSE}
+FeaturePlot(sc, 'tdTomato')
+```
+
+# Analysis of HUVEC
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+huvec <- readRDS(paste0(WORKDIR, use.name, '.huvec.rds'))
+```
+
+```{r huvec marker, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+huvec <- subset(sc, idents2 == "HUVEC")
+FeaturePlot(huvec, features = c('PECAM1'))
+
+huvec <- SCTransform(huvec, return.only.var.genes = FALSE)
+
+huvec <- RunPCA(huvec, verbose = FALSE)
+huvec <- RunUMAP(huvec, reduction = "pca", dims = 1:30, verbose = FALSE)
+
+huvec$seurat_clusters <- huvec$source
+Idents(huvec) <- "source"
+
+dittoDimPlot(huvec, reduction.use = "umap", "source", size = 0.5) +
+  ggtitle('By sample')
+```
+
+```{r cell numbers of huvec, echo=FALSE, message=FALSE, warning=FALSE, paged.print=TRUE}
+t <- table(huvec$source) %>% 
+  as.data.frame()
+
+colnames(t) <- c('source', 'number of cells')
+
+t
+```
+## DE
+
+The CLU gene is known for its cytoprotective function. It has also been shown that in some cases this gene [promotes angiogenesis](https://pubmed.ncbi.nlm.nih.gov/23616046/). PLCG2 is a transmembrane signaling enzyme that catalyzes the conversion of 1-phosphatidyl-1D-myo-inositol 4,5-bisphosphate to 1D-myo-inositol 1,4,5-trisphosphate (IP3) and diacylglycerol (DAG) using calcium as a cofactor. IP3 and DAG are second messenger molecules important for transmitting signals from growth factor receptors. HSD17B14, are primarily involved in metabolism of steroids at the C17 position and also of other substrates, such as fatty acids, prostaglandins, and xenobiotics. PPM1L, the encoded protein downregulates apoptosis signal-regulating kinase 1, a protein that initiates a signaling cascade that leads to apoptosis when cells are subjected to [cytotoxic stresses](https://www.genecards.org/cgi-bin/carddisp.pl?gene=PPM1L). DDIT3 plays an essential role in the response to a wide variety of cell stresses and induces cell cycle arrest and apoptosis in response to ER [stress](https://pubmed.ncbi.nlm.nih.gov/15775988/). CHAC1 is a negative regulator of Notch signaling pathway.
+Anillin (ANLN), an actin-binding protein, reportedly plays a vital role in cell proliferation and migration, [particularly in cytokinesis](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7353083/). H19 regulates cell division and aging, is [low expressed in old cells](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6302267/). The extracellular domain of TMEFF2 interferes with PDGF-AA–stimulated [fibroblast proliferation](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3084709/). KIFF11, the function of this gene product includes chromosome positioning, centrosome separation and establishing a bipolar spindle during [cell mitosis](https://www.genecards.org/cgi-bin/carddisp.pl?gene=KIF11). 
+
+```{r echo=FALSE, fig.height=6, fig.width=8, message=FALSE, warning=FALSE}
+markers.source.all <- FindAllMarkers(huvec, only.pos = TRUE, assay = 'RNA', #min.pct = 0.25,
+                                   # min.diff.pct = 0.1, logfc.threshold = 0.25
+                                 )
+
+var_regex <-  '^HLA-|^RNA|^RP'
+var_feat <- grep(var_regex, markers.source.all$gene, invert=T, value=T)
+
+top5 <- markers.source.all %>% 
+  #dplyr::filter(gene %in% var_feat) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+
+
+dittoDotPlot(huvec, vars = unique(top5$gene), 
+             max.color='#6495EDFF', min.color='white', 
+             group.by = 'seurat_clusters') +
+  ylab('Source') +
+  plot_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+```
+
+Based on this analysis, we see that placental cells do not change the expression of markers, however, the expression of ANLN genes is observed, which plays a vital role in division and the KIFF11 gene, which is establishing a bipolar spindle during mitosis. So it can be assumed that the addition of placental cells increases the proliferation of endothelial cells. 
+
+In the sample with the addition of pericytes, a marker associated with cellular stress (DDIT3) is observed - a larger number of cells express this gene. It also reduces the expression of the H19 gene, which prevents cellular aging of endothelial cells.
+
+In multiculture, the expression of the cytoprotector gene (CLU) and the downregulates apoptosis gene (PPM1L) is observed.
+
+Thus, it seems that the addition of placenta enhances proliferation, while the addition of placenta together with pericytes compensates for the negative effects of the addition of pericytes. 
+
+```{r huvec preprocessing for placenta, eval=FALSE, include=FALSE}
+huvec_pl <- subset(sc, idents2 == "HUVEC" & (source == 'My.Hu' | source == 'Pl.My.Hu'))
+huvec_pl <- SCTransform(huvec_pl, return.only.var.genes = FALSE)
+huvec_pl <- RunPCA(huvec_pl, verbose = FALSE)
+huvec_pl <- RunUMAP(huvec_pl, reduction = "pca", dims = 1:30, verbose = FALSE)
+huvec_pl$source <- source[colnames(huvec_pl)]
+Idents(huvec_pl) <- "source"
+huvec_pl$seurat_clusters <- huvec_pl$source
+
+dittoDimPlot(huvec_pl, reduction.use = "umap", "source", size = 0.5) +
+  ggtitle('By sample')
+```
+
+```{r markers huvec placenta, eval=FALSE, fig.height=4, fig.width=9, message=FALSE, warning=FALSE, include=FALSE}
+DefaultAssay(object = huvec_pl) <- "RNA"
+# huvec_pl <- NormalizeData(huvec_pl)
+
+markers.source <- FindAllMarkers(huvec_pl, only.pos = TRUE, assay = 'RNA'#min.pct = 0.25,
+                                   # min.diff.pct = 0.1, logfc.threshold = 0.25
+                                 )
+
+var_regex <-  '^HLA-|^RNA|^RP'
+var_feat <- grep(var_regex, markers.source$gene, invert=T, value=T)
+
+top10 <- markers.source %>% 
+  dplyr::filter(gene %in% var_feat) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>% 
+  top_n(n = 10, wt = avg_log2FC)
+
+
+dittoDotPlot(huvec_pl, vars = unique(top10$gene), 
+             max.color='#6495EDFF', min.color='white', 
+             group.by = 'seurat_clusters', scale = F) +
+  ylab('Source') +
+  plot_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+
+# VlnPlot(huvec, features = unique(top5$gene), group.by = "SCT_snn_res.0.2") 
+#ggsave(paste0(PLOTSDIR, 'DEG.png'), width=8, height=4)
+```
+
+## GSEA
+```{r huvec GSEA, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+gene.sets <- getGeneSets(library = "C2", subcategory = 'CP:WIKIPATHWAYS')
+
+ES <- enrichIt(obj = huvec_pl[["RNA"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = 15,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES$cluster <- huvec_pl$seurat_clusters
+
+huvec_pl <- AddMetaData(huvec_pl, ES)
+
+output <- getSignificance(ES, 
+                          group = "cluster", 
+                          gene.sets = names(ES)[1:578])
+
+output %>% 
+  filter(FDR < 0.05)
+```
+
+```{r eval=FALSE, fig.height=6, fig.width=10, message=FALSE, warning=FALSE, include=FALSE}
+my_comparisons <- list(c('My.Hu', 'Pl.My.Hu'))
+
+dittoPlot(huvec_pl, c('WP_ELECTRON_TRANSPORT_CHAIN_OXPHOS_SYSTEM_IN_MITOCHONDRIA',
+                      'WP_OXIDATIVE_PHOSPHORYLATION',
+                      'WP_MITOCHONDRIAL_COMPLEX_IV_ASSEMBLY'),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("p = %.2g", p),
+              step_increase = 0.15) +
+  ylim(0, 1.2) +
+  plot_theme
+```
+
+```{r huvec_pl GSEA, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+gene.sets <- getGeneSets(library = "C2", subcategory = 'CP:REACTOME')
+
+ES_reactome <- enrichIt(obj = huvec_pl[["RNA"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = 15,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES_reactome$cluster <- huvec_pl$seurat_clusters
+
+huvec_pl <- AddMetaData(huvec_pl, ES_reactome)
+
+output <- getSignificance(ES_reactome, 
+                          group = "cluster", 
+                          gene.sets = names(ES_reactome)[1:1306])
+
+output %>% 
+  filter(FDR < 0.05)
+```
+
+```{r eval=FALSE, fig.height=6, fig.width=10, message=FALSE, warning=FALSE, include=FALSE}
+my_comparisons <- list(c('My.Hu', 'Pl.My.Hu'))
+
+dittoPlot(huvec_pl, c('REACTOME_RESPIRATORY_ELECTRON_TRANSPORT',
+                      'REACTOME_RESPIRATORY_ELECTRON_TRANSPORT_ATP_SYNTHESIS_BY_CHEMIOSMOTIC_COUPLING_AND_HEAT_PRODUCTION_BY_UNCOUPLING_PROTEINS'),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("p = %.2g", p),
+              step_increase = 0.15) +
+  ylim(0, 1.2) +
+  plot_theme
+```
+
+```{r huvec_pl go GSEA, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+gene.sets <- getGeneSets(library = "C5", subcategory = 'GO:BP')
+
+ES_go <- enrichIt(obj = huvec_pl[["RNA"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = 15,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES_go$cluster <- huvec_pl$seurat_clusters
+
+huvec_pl <- AddMetaData(huvec_pl, ES_go)
+
+output <- getSignificance(ES_go, 
+                          group = "cluster", 
+                          gene.sets = names(ES_go)[1:5736])
+
+output %>% 
+  filter(FDR < 0.05)
+
+saveRDS(huvec_pl, paste0(WORKDIR, use.name, '.huvec_pl.rds'))
+```
+
+```{r huvec preprocessing for pericytes, eval=FALSE, include=FALSE}
+huvec_pr <- subset(sc, idents2 == "HUVEC" & (source == 'My.Hu' | source == 'My.Pr.Hu'))
+huvec_pr <- SCTransform(huvec_pr, return.only.var.genes = FALSE)
+huvec_pr <- RunPCA(huvec_pr, verbose = FALSE)
+huvec_pr <- RunUMAP(huvec_pr, reduction = "pca", dims = 1:15, verbose = FALSE)
+huvec_pr$source <- source[colnames(huvec_pr)]
+Idents(huvec_pr) <- "source"
+huvec_pr$seurat_clusters <- huvec_pr$source
+
+dittoDimPlot(huvec_pr, reduction.use = "umap", "source", size = 0.5) +
+  ggtitle('By sample')
+```
+
+```{r markers huvec_pr, eval=FALSE, fig.height=4, fig.width=9, message=FALSE, warning=FALSE, include=FALSE}
+DefaultAssay(object = huvec_pr) <- "RNA"
+huvec_pr <- NormalizeData(huvec_pr)
+
+markers.source.pr <- FindAllMarkers(huvec_pr, only.pos = TRUE#min.pct = 0.25,
+                                   # min.diff.pct = 0.1, logfc.threshold = 0.25
+                                 )
+
+var_regex <-  '^HLA-|^RNA|^RP'
+var_feat <- grep(var_regex, markers.source.pr$gene, invert=T, value=T)
+
+top10 <- markers.source.pr %>% 
+  dplyr::filter(gene %in% var_feat) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>% 
+  top_n(n = 10, wt = avg_log2FC)
+
+
+dittoDotPlot(huvec_pr, vars = unique(top10$gene), 
+             max.color='#6495EDFF', min.color='white', 
+             group.by = 'seurat_clusters', scale = F) +
+  ylab('Source') +
+  plot_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+
+# VlnPlot(huvec, features = unique(top5$gene), group.by = "SCT_snn_res.0.2") 
+#ggsave(paste0(PLOTSDIR, 'DEG.png'), width=8, height=4)
+```
+
+```{r huvec_pr GSEA, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+gene.sets <- getGeneSets(library = "C2", subcategory = 'CP:WIKIPATHWAYS')
+
+ES <- enrichIt(obj = huvec_pr[["RNA"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = 15,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES$cluster <- huvec_pr$seurat_clusters
+
+huvec_pr <- AddMetaData(huvec_pr, ES)
+
+output <- getSignificance(ES, 
+                          group = "cluster", 
+                          gene.sets = names(ES)[1:609])
+
+output %>% 
+  filter(FDR < 0.05)
+```
+
+```{r eval=FALSE, fig.height=8, fig.width=13, message=FALSE, warning=FALSE, include=FALSE}
+my_comparisons <- list(c('My.Hu', 'My.Pr.Hu'))
+
+dittoPlot(huvec_pr, c('WP_CAMKK2_PATHWAY',
+                      'WP_IL10_ANTIINFLAMMATORY_SIGNALING_PATHWAY',
+                      'WP_IL4_SIGNALING_PATHWAY',
+                      'WP_IL7_SIGNALING_PATHWAY',
+                      'WP_IL9_SIGNALING_PATHWAY',
+                      'WP_INFLAMMATORY_RESPONSE_PATHWAY',
+                      'WP_MRNA_PROCESSING',
+                      'WP_NRF2_PATHWAY',
+                      'WP_OXIDATIVE_PHOSPHORYLATION',
+                      'WP_PROTEASOME_DEGRADATION'),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("p = %.2g", p),
+              step_increase = 0.15) +
+  ylim(0, 1.2) +
+  plot_theme
+```
+
+
+```{r huvec_pr reactome GSEA, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+gene.sets <- getGeneSets(library = "C2", subcategory = 'CP:REACTOME')
+
+ES_reactome <- enrichIt(obj = huvec_pr[["RNA"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = 15,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES_reactome$cluster <- huvec_pr$seurat_clusters
+
+huvec_pr <- AddMetaData(huvec_pr, ES_reactome)
+
+output <- getSignificance(ES_reactome, 
+                          group = "cluster", 
+                          gene.sets = names(ES_reactome)[1:1402])
+
+output %>% 
+  filter(FDR < 0.05)
+```
+
+```{r eval=FALSE, fig.height=8, fig.width=14, message=FALSE, warning=FALSE, include=FALSE}
+my_comparisons <- list(c('My.Hu', 'My.Pr.Hu'))
+
+dittoPlot(huvec_pr, c('REACTOME_APOPTOSIS',
+                      'REACTOME_COLLAGEN_BIOSYNTHESIS_AND_MODIFYING_ENZYMES',
+                      'REACTOME_COLLAGEN_FORMATION',
+                      'REACTOME_DEGRADATION_OF_THE_EXTRACELLULAR_MATRIX',
+                      'REACTOME_EXTRACELLULAR_MATRIX_ORGANIZATION',
+                      'REACTOME_INTEGRIN_CELL_SURFACE_INTERACTIONS',
+                      'REACTOME_MET_ACTIVATES_PTK2_SIGNALING',
+                      'REACTOME_PROGRAMMED_CELL_DEATH',
+                      'REACTOME_REGULATION_OF_TP53_ACTIVITY',
+                      'REACTOME_SIGNALING_BY_PDGF',
+                      'REACTOME_SUPPRESSION_OF_APOPTOSIS',
+                      'REACTOME_S_PHASE'),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("p = %.2g", p),
+              step_increase = 0.15) +
+  ylim(0, 1.2) +
+  plot_theme
+```
+
+```{r huvec_pr go GSEA, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+gene.sets <- getGeneSets(library = "C5", subcategory = 'GO:BP')
+
+ES_go <- enrichIt(obj = huvec_pr[["RNA"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = 15,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES_go$cluster <- huvec_pr$seurat_clusters
+
+huvec_pr <- AddMetaData(huvec_pr, ES_go)
+
+output <- getSignificance(ES_go, 
+                          group = "cluster", 
+                          gene.sets = names(ES_go)[1:6317])
+
+output %>% 
+  filter(FDR < 0.05)
+saveRDS(huvec_pr, paste0(WORKDIR, use.name, '.huvec_pr.rds'))
+```
+
+```{r eval=FALSE, fig.height=6, fig.width=10, message=FALSE, warning=FALSE, include=FALSE}
+my_comparisons <- list(c('My.Hu', 'My.Pr.Hu'))
+
+dittoPlot(huvec_pr, c('GOBP_CELL_CYCLE',
+                      'GOBP_COLLAGEN_FIBRIL_ORGANIZATION',
+                      'GOBP_HOMEOSTASIS_OF_NUMBER_OF_CELLS',
+                      'GOBP_MITOTIC_CELL_CYCLE_PHASE_TRANSITION',
+                      'GOBP_MITOTIC_CYTOKINETIC_PROCESS',
+                      'GOBP_POSITIVE_REGULATION_OF_BLOOD_VESSEL_ENDOTHELIAL_CELL_PROLIFERATION_INVOLVED_IN_SPROUTING_ANGIOGENESIS'),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("p = %.2g", p),
+              step_increase = 0.15) +
+  ylim(0, 1.4) +
+  plot_theme +
+  facet_wrap(~var, labeller = as_labeller(label_change, label_wrap_gen(width=30)))
+```
+
+```{r huvec preprocessing for placenta+pericytes, eval=FALSE, include=FALSE}
+huvec_pl_pr <- subset(sc, idents2 == "HUVEC" & (source == 'My.Hu' | source == 'Pl.My.Pr.Hu'))
+huvec_pl_pr <- SCTransform(huvec_pl_pr, return.only.var.genes = FALSE)
+huvec_pl_pr <- RunPCA(huvec_pl_pr, verbose = FALSE)
+huvec_pl_pr <- RunUMAP(huvec_pl_pr, reduction = "pca", dims = 1:30, verbose = FALSE)
+huvec_pl_pr$source <- source[colnames(huvec_pl_pr)]
+Idents(huvec_pl_pr) <- "source"
+huvec_pl_pr$seurat_clusters <- huvec_pl_pr$source
+
+dittoDimPlot(huvec_pl_pr, reduction.use = "umap", "source", size = 0.5) +
+  ggtitle('By sample')
+```
+
+```{r markers huvec_pl_pr, eval=FALSE, fig.height=4, fig.width=9, message=FALSE, warning=FALSE, include=FALSE}
+DefaultAssay(object = huvec_pl_pr) <- "RNA"
+huvec_pl_pr <- NormalizeData(huvec_pl_pr)
+
+markers.source_pl.pr <- FindAllMarkers(huvec_pl_pr, only.pos = TRUE, assay = 'RNA', #min.pct = 0.25,
+                                   # min.diff.pct = 0.1, logfc.threshold = 0.25
+                                 )
+
+var_regex <-  '^HLA-|^RNA|^RP'
+var_feat <- grep(var_regex, markers.source_pl.pr$gene, invert=T, value=T)
+
+top10 <- markers.source_pl.pr %>% 
+  dplyr::filter(gene %in% var_feat) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>% 
+  top_n(n = 10, wt = avg_log2FC)
+
+
+dittoDotPlot(huvec_pl_pr, vars = unique(top10$gene), 
+             max.color='#6495EDFF', min.color='white', 
+             group.by = 'seurat_clusters', scale = F) +
+  ylab('Source') +
+  plot_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+
+# VlnPlot(huvec, features = unique(top5$gene), group.by = "SCT_snn_res.0.2") 
+#ggsave(paste0(PLOTSDIR, 'DEG.png'), width=8, height=4)
+```
+
+
+```{r huvec_pl_pr GSEA, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+gene.sets <- getGeneSets(library = "C2", subcategory = 'CP:WIKIPATHWAYS')
+
+ES <- enrichIt(obj = huvec_pl_pr[["RNA"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = 15,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES$cluster <- huvec_pl_pr$seurat_clusters
+
+huvec_pl_pr <- AddMetaData(huvec_pl_pr, ES)
+
+output <- getSignificance(ES, 
+                          group = "cluster", 
+                          gene.sets = names(ES)[1:596])
+
+output %>% 
+  filter(FDR < 0.05)
+```
+
+
+```{r eval=FALSE, fig.height=6, fig.width=10, message=FALSE, warning=FALSE, include=FALSE}
+my_comparisons <- list(c('My.Hu', 'Pl.My.Pr.Hu'))
+
+dittoPlot(huvec_pl_pr, c('WP_CAMKK2_PATHWAY',
+                      'WP_IL10_ANTIINFLAMMATORY_SIGNALING_PATHWAY',
+                      'WP_INFLAMMATORY_RESPONSE_PATHWAY',
+                      'WP_MRNA_PROCESSING',
+                      'WP_NRF2_PATHWAY',
+                      'WP_OXIDATIVE_PHOSPHORYLATION',
+                      'WP_PROTEASOME_DEGRADATION',
+                      #NEW
+                      'WP_NOTCH_SIGNALING_PATHWAY',
+                      'WP_WNT_SIGNALING'),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("p = %.2g", p),
+              step_increase = 0.15) +
+  ylim(0, 1.2) +
+  plot_theme  +
+  facet_wrap(~var, labeller = as_labeller(label_change, label_wrap_gen(width=30)))
+```
+
+
+```{r huvec_pl_pr reactome GSEA, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+gene.sets <- getGeneSets(library = "C2", subcategory = 'CP:REACTOME')
+
+ES_reactome <- enrichIt(obj = huvec_pl_pr[["RNA"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = 15,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES_reactome$cluster <- huvec_pl_pr$seurat_clusters
+
+huvec_pl_pr <- AddMetaData(huvec_pl_pr, ES_reactome)
+
+ES_go <- huvec_pl_pr@meta.data %>%
+  select(starts_with("GOBP"))
+
+output <- getSignificance(ES_reactome, 
+                          group = "cluster", 
+                          gene.sets = names(ES_reactome)[1:1339])
+
+output %>% 
+  filter(FDR < 0.05)
+```
+
+```{r eval=FALSE, fig.height=6, fig.width=10, message=FALSE, warning=FALSE, include=FALSE}
+my_comparisons <- list(c('My.Hu', 'Pl.My.Pr.Hu'))
+
+dittoPlot(huvec_pl_pr, c('REACTOME_APOPTOSIS',
+                      'REACTOME_COLLAGEN_BIOSYNTHESIS_AND_MODIFYING_ENZYMES',
+                      'REACTOME_COLLAGEN_FORMATION',
+                      'REACTOME_DEGRADATION_OF_THE_EXTRACELLULAR_MATRIX',
+                      'REACTOME_EXTRACELLULAR_MATRIX_ORGANIZATION',
+                      'REACTOME_MET_ACTIVATES_PTK2_SIGNALING',
+                      'REACTOME_PROGRAMMED_CELL_DEATH',
+
+                      'REACTOME_SIGNALING_BY_PDGF'),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("p = %.2g", p),
+              step_increase = 0.15) +
+  ylim(0, 1.2) +
+  plot_theme  +
+  facet_wrap(~var, labeller = as_labeller(label_change, label_wrap_gen(width=30)))
+
+```
+
+
+```{r huvec_pl_pr go GSEA, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+gene.sets <- getGeneSets(library = "C5", subcategory = 'GO:BP')
+
+ES_go <- enrichIt(obj = huvec_pl_pr[["RNA"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = 15,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES_go$cluster <- huvec_pl_pr$seurat_clusters
+
+huvec_pl_pr <- AddMetaData(huvec_pl_pr, ES_go)
+
+output <- getSignificance(ES_go, 
+                          group = "cluster", 
+                          gene.sets = names(ES_go)[1:6005])
+
+output %>% 
+  filter(FDR < 0.05)
+
+saveRDS(huvec_pl_pr, paste0(WORKDIR, use.name, '.huvec_pl_pr.rds'))
+```
+
+```{r eval=FALSE, fig.height=6, fig.width=10, message=FALSE, warning=FALSE, include=FALSE}
+my_comparisons <- list(c('My.Hu', 'Pl.My.Pr.Hu'))
+
+dittoPlot(huvec_pl_pr, c('GOBP_COLLAGEN_FIBRIL_ORGANIZATION',
+                      'GOBP_HOMEOSTASIS_OF_NUMBER_OF_CELLS',
+                      'GOBP_MITOTIC_CYTOKINETIC_PROCESS',
+                      'GOBP_POSITIVE_REGULATION_OF_BLOOD_VESSEL_ENDOTHELIAL_CELL_PROLIFERATION_INVOLVED_IN_SPROUTING_ANGIOGENESIS',
+                      
+                      'GOBP_APOPTOTIC_SIGNALING_PATHWAY',
+                      'GOBP_BLOOD_VESSEL_ENDOTHELIAL_CELL_PROLIFERATION_INVOLVED_IN_SPROUTING_ANGIOGENESIS'
+                      ),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("p = %.2g", p),
+              step_increase = 0.15) +
+  scale_fill_manual(values = my_colors) +
+  ylim(0, 1.4) +
+  plot_theme +
+  facet_wrap(~var, labeller = as_labeller(label_change, label_wrap_gen(width=30)))
+```
+
+```{r huvec preprocessing for vs, eval=FALSE, include=FALSE}
+huvec_vs <- subset(sc, idents2 == "HUVEC" & (source == 'My.Pr.Hu' | source == 'Pl.My.Pr.Hu'))
+huvec_vs <- SCTransform(huvec_vs, return.only.var.genes = FALSE)
+huvec_vs <- RunPCA(huvec_vs, verbose = FALSE)
+huvec_vs <- RunUMAP(huvec_vs, reduction = "pca", dims = 1:30, verbose = FALSE)
+Idents(huvec_vs) <- "source"
+huvec_vs$seurat_clusters <- huvec_vs$source
+dittoDimPlot(huvec_vs, reduction.use = "umap", "source", size = 0.5) +
+  ggtitle('By sample')
+```
+
+```{r markers huvec_vs, echo=FALSE, fig.height=4, fig.width=9, message=FALSE, warning=FALSE}
+DefaultAssay(object = huvec_vs) <- "RNA"
+huvec_vs <- NormalizeData(huvec_vs)
+
+markers.source_vs <- FindAllMarkers(huvec_vs, only.pos = TRUE, assay = 'RNA', min.pct = 0.25,
+                                    min.diff.pct = 0.1, logfc.threshold = 0.25
+                                 )
+
+var_regex <-  '^HLA-|^RNA|^RP'
+var_feat <- grep(var_regex, markers.source_vs$gene, invert=T, value=T)
+
+top10 <- markers.source_vs %>% 
+  dplyr::filter(gene %in% var_feat) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>% 
+  top_n(n = 10, wt = avg_log2FC)
+
+
+dittoDotPlot(huvec_vs, vars = unique(top10$gene), 
+             max.color='#6495EDFF', min.color='white', 
+             group.by = 'seurat_clusters', scale = F) +
+  ylab('Source') +
+  plot_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+
+# VlnPlot(huvec, features = unique(top5$gene), group.by = "SCT_snn_res.0.2") 
+#ggsave(paste0(PLOTSDIR, 'DEG.png'), width=8, height=4)
+
+
+```
+
+
+```{r huvec_vs GSEA, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+gene.sets <- getGeneSets(library = "C2", subcategory = 'CP:WIKIPATHWAYS')
+
+ES <- enrichIt(obj = huvec_vs[["RNA"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = 15,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES$cluster <- huvec_vs$seurat_clusters
+
+huvec_vs <- AddMetaData(huvec_vs, ES)
+
+output <- getSignificance(ES, 
+                          group = "cluster", 
+                          gene.sets = names(ES)[1:611])
+
+output %>% 
+  filter(FDR < 0.05)
+```
+
+
+```{r eval=FALSE, fig.height=6, fig.width=10, message=FALSE, warning=FALSE, include=FALSE}
+my_comparisons <- list(c('My.Pr.Hu', 'Pl.My.Pr.Hu'))
+
+dittoPlot(huvec_vs, c('WP_WNT_SIGNALING'),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("p = %.2g", p),
+              step_increase = 0.15) +
+  ylim(0, 1.2) +
+  plot_theme
+```
+
+```{r huvec_vs reactome GSEA, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+gene.sets <- getGeneSets(library = "C2", subcategory = 'CP:REACTOME')
+
+ES_reactome <- enrichIt(obj = huvec_vs[["RNA"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = 15,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES_reactome$cluster <- huvec_vs$seurat_clusters
+
+huvec_vs <- AddMetaData(huvec_vs, ES_reactome)
+
+output <- getSignificance(ES_reactome, 
+                          group = "cluster", 
+                          gene.sets = names(ES_reactome)[1:1403])
+
+output %>% 
+  filter(FDR < 0.05)
+```
+
+```{r eval=FALSE, fig.height=6, fig.width=10, message=FALSE, warning=FALSE, include=FALSE}
+my_comparisons <- list(c('My.Pr.Hu', 'Pl.My.Pr.Hu'))
+
+dittoPlot(huvec_vs, c('REACTOME_RUNX3_REGULATES_WNT_SIGNALING'),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("p = %.2g", p),
+              step_increase = 0.15) +
+  ylim(0, 1.2) +
+  plot_theme 
+
+```
+
+```{r huvec_vs go GSEA, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+gene.sets <- getGeneSets(library = "C5", subcategory = 'GO:BP')
+
+ES_go <- enrichIt(obj = huvec_vs[["RNA"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = 15,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES_go$cluster <- huvec_vs$seurat_clusters
+
+huvec_vs <- AddMetaData(huvec_vs, ES_go)
+
+output <- getSignificance(ES_go, 
+                          group = "cluster", 
+                          gene.sets = names(ES_go)[1:6323])
+
+output %>% 
+  filter(FDR < 0.05)
+
+saveRDS(huvec_vs, paste0(WORKDIR, use.name, '.huvec_vs.rds'))
+```
+
+```{r eval=FALSE, fig.height=6, fig.width=10, message=FALSE, warning=FALSE, include=FALSE}
+my_comparisons <- list(c('My.Pr.Hu', 'Pl.My.Pr.Hu'))
+
+dittoPlot(huvec_vs, c('GOBP_EPITHELIAL_CELL_PROLIFERATION'),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("p = %.2g", p),
+              step_increase = 0.15) +
+  scale_fill_manual(values = my_colors) +
+  ylim(0, 1.4) +
+  plot_theme 
+```
+
+
+```{r eval=FALSE, include=FALSE}
+DefaultAssay(object = huvec) <- "RNA"
+huvec <- NormalizeData(huvec)
+
+markers.source.all <- FindAllMarkers(huvec, only.pos = TRUE, assay = 'RNA', #min.pct = 0.25,
+                                   # min.diff.pct = 0.1, logfc.threshold = 0.25
+                                 )
+
+var_regex <-  '^HLA-|^RNA|^RP'
+var_feat <- grep(var_regex, markers.source.all$gene, invert=T, value=T)
+
+top5 <- markers.source.all %>% 
+  #dplyr::filter(gene %in% var_feat) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+
+
+dittoDotPlot(huvec, vars = unique(top5$gene), 
+             max.color='#6495EDFF', min.color='white', 
+             group.by = 'seurat_clusters') +
+  ylab('Source') +
+  plot_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+```
+
+```{r wiki common huvec, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+gene.sets <- getGeneSets(library = "C2", subcategory = 'CP:WIKIPATHWAYS')
+
+ES <- enrichIt(obj = huvec[["RNA"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = 15,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES$cluster <- huvec$seurat_clusters
+
+huvec <- AddMetaData(huvec, ES)
+
+```
+
+```{r reactome common huvec, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+gene.sets <- getGeneSets(library = "C2", subcategory = 'CP:REACTOME')
+
+ES_reactome <- enrichIt(obj = huvec[["RNA"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = 15,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES_reactome$cluster <- huvec$seurat_clusters
+
+huvec <- AddMetaData(huvec, ES_reactome)
+```
+
+```{r huvec go GSEA, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+gene.sets <- getGeneSets(library = "C5", subcategory = 'GO:BP')
+
+ES_go <- enrichIt(obj = huvec[["RNA"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = 15,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES_go$cluster <- huvec$seurat_clusters
+
+huvec <- AddMetaData(huvec, ES_go)
+
+saveRDS(huvec, paste0(WORKDIR, use.name, '.huvec.rds'))
+```
+
+### Wiki 
+```{r eval=FALSE, include=FALSE}
+ES_go <- huvec@meta.data[, c("source", grep("^GOBP", names(huvec@meta.data), value = TRUE))]
+ES_reactome <- huvec@meta.data[, c("source", grep("^REACTOME", names(huvec@meta.data), value = TRUE))]
+ES_wp <- huvec@meta.data[, c("source", grep("^WP", names(huvec@meta.data), value = TRUE))]
+
+output <- getSignificance(ES_go %>% 
+                            filter(source == 'My.Hu' | source == 'Pl.My.Pr.Hu'), 
+                          group = "source", 
+                          gene.sets = names(ES_go)[2:length(ES_go)])
+
+output %>% 
+  filter(FDR < 0.05)
+```
+
+```{r echo=FALSE, fig.height=8, fig.width=13, message=FALSE, warning=FALSE}
+my_comparisons <- list(c('My.Hu', 'My.Pr.Hu'), c('My.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'My.Pr.Hu'))
+
+dittoPlot(huvec, c('WP_CAMKK2_PATHWAY',
+                      'WP_IL10_ANTIINFLAMMATORY_SIGNALING_PATHWAY',
+                      'WP_IL7_SIGNALING_PATHWAY',
+                      'WP_IL9_SIGNALING_PATHWAY',
+                      'WP_MRNA_PROCESSING',
+                      'WP_NRF2_PATHWAY',
+                      'WP_OXIDATIVE_PHOSPHORYLATION',
+                      'WP_PROTEASOME_DEGRADATION',
+                      'WP_NOTCH_SIGNALING_PATHWAY',
+                      'WP_WNT_SIGNALING',
+                   'WP_CELL_CYCLE'),
+          group.by = "source",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("p = %.2g", p),
+              step_increase = 0.15) +
+  ylim(0, 1.8) +
+  plot_theme +
+  facet_wrap(~var, labeller = as_labeller(label_change, label_wrap_gen(width=30))) +
+  ggtitle("HUVEC")
+```
+
+### Reactome
+```{r echo=FALSE, fig.height=8, fig.width=13}
+my_comparisons <- list(c('My.Hu', 'My.Pr.Hu'), c('My.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'My.Pr.Hu'))
+
+dittoPlot(huvec, c('REACTOME_APOPTOSIS',
+                      'REACTOME_COLLAGEN_BIOSYNTHESIS_AND_MODIFYING_ENZYMES',
+                      'REACTOME_COLLAGEN_FORMATION',
+                      'REACTOME_DEGRADATION_OF_THE_EXTRACELLULAR_MATRIX',
+                      'REACTOME_PROGRAMMED_CELL_DEATH',
+                      'REACTOME_S_PHASE',
+                   'REACTOME_CELL_CYCLE',
+                   'REACTOME_G2_M_CHECKPOINTS'
+                   ),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("p = %.2g", p),
+              step_increase = 0.2) +
+  ylim(0, 1.8) +
+  plot_theme +
+  facet_wrap(~var, labeller = as_labeller(label_change, label_wrap_gen(width=30))) +
+  ggtitle("HUVEC")
+```
+
+### GO
+
+```{r echo=FALSE, fig.height=8, fig.width=13, message=FALSE, warning=FALSE}
+my_comparisons <- list(c('My.Hu', 'My.Pr.Hu'), c('My.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'My.Pr.Hu'))
+
+dittoPlot(huvec, c('GOBP_COLLAGEN_FIBRIL_ORGANIZATION',
+                      'GOBP_MITOTIC_CYTOKINETIC_PROCESS',
+                      'GOBP_POSITIVE_REGULATION_OF_BLOOD_VESSEL_ENDOTHELIAL_CELL_PROLIFERATION_INVOLVED_IN_SPROUTING_ANGIOGENESIS',
+                      
+                      'GOBP_APOPTOTIC_SIGNALING_PATHWAY',
+                      'GOBP_BLOOD_VESSEL_ENDOTHELIAL_CELL_PROLIFERATION_INVOLVED_IN_SPROUTING_ANGIOGENESIS',
+                      'GOBP_EPITHELIAL_CELL_PROLIFERATION'
+                      ),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("p = %.2g", p),
+              step_increase = 0.15) +
+  scale_fill_manual(values = my_colors) +
+  ylim(0, 1.6) +
+  plot_theme +
+  facet_wrap(~var, labeller = as_labeller(label_change, label_wrap_gen(width=30))) +
+  ggtitle("HUVEC")
+```
+
+As a result, we see that the addition of placenta has little effect on endothelial cells, only increases proliferation. While pericytes reduce the activity of collagen formation, enrich the antiinflammatory pathways, encrich the WNT and Notch signaling pathways. 
+
+# Analysis of Pericytes
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+pericytes <- readRDS(paste0(WORKDIR, use.name, '.pericytes.rds'))
+```
+
+```{r cell numbers of pericytes, echo=FALSE, message=FALSE, warning=FALSE}
+t <- table(pericytes$source) %>% 
+  as.data.frame()
+
+colnames(t) <- c('source', 'number of cells')
+
+t
+```
+
+```{r pericytes preprocessing, eval=FALSE, include=FALSE}
+pericytes <- subset(sc, idents2 == "Pericytes" & (source == 'My.Pr.Hu' | source == 'Pl.My.Pr.Hu'))
+pericytes <- SCTransform(pericytes, return.only.var.genes = FALSE)
+pericytes <- RunPCA(pericytes, verbose = FALSE)
+pericytes <- RunUMAP(pericytes, reduction = "pca", dims = 1:30, verbose = FALSE)
+pericytes <- FindNeighbors(pericytes, reduction = "pca", dims = 1:30)
+pericytes <- FindClusters(pericytes, resolution = seq(0.1, 0.5, by=0.1))
+pericytes <- FindClusters(pericytes, resolution = 0.15)
+clustree(pericytes)
+
+dittoDimPlot(pericytes, reduction.use = "umap", "source", size = 0.5) +
+  ggtitle('By sample')
+```
+
+```{r echo=FALSE, fig.height=5, fig.width=12, message=FALSE, warning=FALSE}
+Idents(pericytes) <- "SCT_snn_res.0.2"
+pericytes$seurat_clusters <- pericytes$SCT_snn_res.0.2
+pericytes <- subset(pericytes, seurat_clusters %in% c('0', '1', '2', '3', '4'))
+p1 <- dittoDimPlot(pericytes, reduction.use = "umap", "seurat_clusters", size = 1, 
+                   color.panel = my_colors) +
+  ggtitle('By clusters') +
+  plot_theme
+
+p2 <- dittoDimPlot(pericytes, reduction.use = "umap", "source", size = 1, , color.panel = my_colors) +
+  ggtitle('By source') +
+  plot_theme
+
+cowplot::plot_grid(p1, p2, 
+          #labels = c('My.Pr.Hu.1', 'Pl.My.Pr.Hu.1'),
+          nrow=1)
+#ggsave(paste0(PLOTSDIR, 'umap.png'), width=12, height=5)
+```
+
+```{r echo=FALSE, fig.height=4, fig.width=10.5, message=FALSE, warning=FALSE}
+p1 <- dittoBarPlot(pericytes, "source", group.by = "seurat_clusters", color.panel = my_colors) +
+  ggtitle('') +
+  plot_theme +
+  NoLegend()
+p2 <- dittoBarPlot(pericytes, "source", group.by = "seurat_clusters", 
+                   scale='count', color.panel = my_colors) +
+  ggtitle('') +
+  plot_theme
+p3 <- dittoBarPlot(pericytes, "seurat_clusters", group.by = "source", 
+                   color.panel = my_colors) +
+  ggtitle('') +
+  plot_theme
+
+cowplot::plot_grid(p1, p2, p3, 
+          nrow=1, rel_widths = c(1, 1.5, 1),
+          labels = c('A', "B", "C"))
+#ggsave(paste0(PLOTSDIR, 'barplot.png'), width=12, height=5)
+```
+
+## DE 
+
+Cluster 0 - all markers are transcription factors involved in development processes.
+
+Cluster 1 - genes associated with tyrosine-kinase.
+
+Cluster 2 - genes of cell junctions. EBF2 stimulate [differentiation](https://apc.amegroups.org/article/view/6805/html) (I am not sure about our case)
+
+Cluster 3 - NMB stimulates [vascularization](https://pubmed.ncbi.nlm.nih.gov/19703440/)
+```{r echo=FALSE, fig.height=5, fig.width=8, message=FALSE, warning=FALSE}
+DefaultAssay(object = pericytes) <- "RNA"
+pericytes <- NormalizeData(pericytes)
+
+markers.pericytes <- FindAllMarkers(pericytes, only.pos = TRUE, assay = 'RNA', #min.pct = 0.25,
+                                   # min.diff.pct = 0.1, logfc.threshold = 0.25
+                                 )
+
+var_regex <-  '^HLA-|^RNA|^RP'
+var_feat <- grep(var_regex, markers.pericytes$gene, invert=T, value=T)
+
+top7 <- markers.pericytes %>% 
+  # dplyr::filter(gene %in% var_feat) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>% 
+  top_n(n = 7, wt = avg_log2FC)
+
+
+dittoDotPlot(pericytes, vars = unique(top7$gene), 
+             max.color='#6495EDFF', min.color='white', 
+             group.by = 'seurat_clusters') +
+  ylab('Cluster') +
+  plot_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+```
+
+## Cell-cycle score
+
+Clusters do not differ significantly from each other in the distribution of cells by phases of the cell cycle
+
+```{r cell-cycle score pericytes, echo=FALSE, fig.height=5, fig.width=14, message=FALSE, warning=FALSE}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+pericytes <- CellCycleScoring(pericytes, s.features = s.genes, g2m.features = g2m.genes)
+
+p1 <- dittoDimPlot(pericytes, reduction.use = "umap", "Phase", size = 0.5, split.by = 'Phase', 
+             color.panel = my_colors) +
+  ggtitle('By phase') +
+  plot_theme +
+  NoLegend()
+
+p2 <- dittoBarPlot(pericytes, "Phase", group.by = "seurat_clusters", color.panel = my_colors) +
+  ggtitle('') +
+  plot_theme
+
+cowplot::plot_grid(p1, p2, 
+          nrow=1, rel_widths = c(1, 0.7),
+          labels = c("A", "B"))
+```
+
+## GSEA
+
+```{r eval=FALSE, include=FALSE}
+ES_reactome <- pericytes@meta.data[, c("seurat_clusters", grep("^REACTOME", names(pericytes@meta.data), value = TRUE))]
+ES_wp <- pericytes@meta.data[, c("seurat_clusters", grep("^WP", names(pericytes@meta.data), value = TRUE))]
+
+output <- getSignificance(ES_reactome, 
+                          group = "seurat_clusters",
+                          gene.sets = names(ES_reactome)[2:length(ES_reactome)],
+                          fit = 'ANOVA')
+
+output %>% 
+  mutate(pathway = rownames(.)) %>% 
+  rowwise() %>% 
+  filter(p.value < 0.05) %>% 
+  filter(median.3 == max(median.0, median.1, median.2, median.3, median.4)) %>% 
+  filter(median.3 - max(median.4, median.0, median.1, median.2) > 0.05)
+```
+
+### 0 cluster
+
+```{r echo=FALSE, fig.height=4, fig.width=8}
+dittoPlot(pericytes, c(
+                      'WP_AMINO_ACID_METABOLISM',
+                      'REACTOME_RUNX2_REGULATES_GENES_INVOLVED_IN_CELL_MIGRATION'
+                       ),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  ylim(0, 1) +
+  plot_theme +
+  facet_wrap(~var, labeller = as_labeller(label_change, label_wrap_gen(width=30))) +
+  ggtitle("Pericytes")
+```
+
+### 1 cluster
+```{r echo=FALSE, fig.height=6, fig.width=8}
+
+dittoPlot(pericytes, c(
+                      'WP_ANGIOGENESIS',
+                      'WP_MATRIX_METALLOPROTEINASES',
+                      'REACTOME_EXTRACELLULAR_MATRIX_ORGANIZATION',
+                      'REACTOME_INTEGRIN_CELL_SURFACE_INTERACTIONS',
+                      'REACTOME_POU5F1_OCT4_SOX2_NANOG_ACTIVATE_GENES_RELATED_TO_PROLIFERATION'
+                       ),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  ylim(0, 1) +
+  plot_theme +
+  facet_wrap(~var, labeller = as_labeller(label_change, label_wrap_gen(width=20))) +
+  ggtitle("Pericytes")
+```
+
+### 2 cluster
+
+```{r echo=FALSE, fig.height=4, fig.width=8}
+
+my_comparisons <- list(c('0', '1'), c('0', '2'), c('0', '3'), c('0', '4'))
+
+dittoPlot(pericytes, c(
+                      'REACTOME_TFAP2_AP_2_FAMILY_REGULATES_TRANSCRIPTION_OF_CELL_CYCLE_FACTORS',
+                      'WP_COMPLEMENT_AND_COAGULATION_CASCADES'
+                       ),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  ylim(0, 1) +
+  plot_theme +
+  facet_wrap(~var, labeller = as_labeller(label_change, label_wrap_gen(width=30))) +
+  ggtitle("Pericytes")
+```
+
+### 4 Cluster
+
+```{r echo=FALSE, fig.height=4, fig.width=8}
+
+my_comparisons <- list(c('0', '1'), c('1', '2'), c('1', '3'), c('1', '4'))
+
+dittoPlot(pericytes, c(
+                      'WP_THYROXINE_THYROID_HORMONE_PRODUCTION',
+                      'REACTOME_INTERLEUKIN_18_SIGNALING'
+                       ),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  ylim(0, 1) +
+  plot_theme +
+  facet_wrap(~var, labeller = as_labeller(label_change, label_wrap_gen(width=30))) +
+  ggtitle("Pericytes")
+```
+
+```{r eval=FALSE, fig.height=6, fig.width=10, include=FALSE}
+my_comparisons <- list(c('Pl.My.Pr.Hu', 'My.Pr.Hu'))
+
+my_comparisons <- list(c('0', '1'), c('0', '2'), c('0', '3'), c('0', '4'))
+
+dittoPlot(pericytes, c('REACTOME_EXTRACELLULAR_MATRIX_ORGANIZATION',
+                       'WP_CELL_CYCLE',
+                       'WP_NOTCH_SIGNALING_PATHWAY',
+                      'REACTOME_SIGNALING_BY_MEMBRANE_TETHERED_FUSIONS_OF_PDGFRA_OR_PDGFRB',
+                      'WP_TP53_NETWORK',
+                      'WP_COMPLEMENT_AND_COAGULATION_CASCADES',
+                       'REACTOME_SIGNALING_BY_PDGF',
+                      'REACTOME_SIGNALING_BY_NOTCH',
+                      'REACTOME_SIGNALING_BY_VEGF',
+                      'REACTOME_SIGNALING_BY_TGFB_FAMILY_MEMBERS'),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("p = %.2g", p),
+              step_increase = 0.2) +
+  ylim(0, 1.5) +
+  plot_theme +
+  facet_wrap(~var, labeller = as_labeller(label_change, label_wrap_gen(width=30)))
+```
+
+
+There are more cells from cluster 0 in the placenta sample. And in the sample without a placenta, cells from clusters 1 and 2 predominate.
+
+In cluster 0, amino acid metabolism is enriched and the "RUNX2_REGULATES_GENES_INVOLVED_IN_CELL_MIGRATION" gene set is enriched. Perhaps the placenta enhances these processes.
+
+In cluster 1, the processes associated with the organization of ECM are more enriched than others, and the enrichment of angiogenesis is also observed. There is also an increased activity of metalloproteinases. This may indicate that the placenta inhibits these processes. However, it is worth noting that cells from this cluster are present in both samples. But there are more of these cells in the sample without the placenta.
+
+## By samples
+
+### DE
+
+```{r echo=FALSE, fig.height=5, fig.width=8, message=FALSE, warning=FALSE}
+pericytes$cluster_source <- paste(pericytes$seurat_clusters, pericytes$source, sep = "_")
+Idents(pericytes) <- "cluster_source"
+
+mono.de0 <- FindMarkers(pericytes,
+                       ident.1 = "0_Pl.My.Pr.Hu",
+                       ident.2 = "0_My.Pr.Hu",
+                       #only.pos = TRUE,
+                       min.pct = 0.4,
+                       min.diff.pct = 0.1, logfc.threshold = 0.25,
+                       verbose = FALSE)
+mono.de0 <- mono.de0 %>% 
+  mutate(gene = row.names(.)) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+  
+mono.de1 <- FindMarkers(pericytes,
+                       ident.1 = "1_Pl.My.Pr.Hu",
+                       ident.2 = "1_My.Pr.Hu",
+                       #only.pos = TRUE,
+                       min.pct = 0.4,
+                       min.diff.pct = 0.1, logfc.threshold = 0.25,
+                       verbose = FALSE)
+mono.de1 <- mono.de1 %>% 
+  mutate(gene = row.names(.)) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+
+mono.de2 <- FindMarkers(pericytes,
+                       ident.1 = "2_Pl.My.Pr.Hu",
+                       ident.2 = "2_My.Pr.Hu",
+                       #only.pos = TRUE,
+                       min.pct = 0.4,
+                       min.diff.pct = 0.1, logfc.threshold = 0.25,
+                       verbose = FALSE)
+mono.de2 <- mono.de2 %>% 
+  mutate(gene = row.names(.)) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+
+mono.de3 <- FindMarkers(pericytes,
+                       ident.1 = "3_Pl.My.Pr.Hu",
+                       ident.2 = "3_My.Pr.Hu",
+                       #only.pos = TRUE,
+                       min.pct = 0.4,
+                       min.diff.pct = 0.1, logfc.threshold = 0.25,
+                       verbose = FALSE)
+mono.de3 <- mono.de3 %>% 
+  mutate(gene = row.names(.)) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+
+mono.de4 <- FindMarkers(pericytes,
+                       ident.1 = "4_Pl.My.Pr.Hu",
+                       ident.2 = "4_My.Pr.Hu",
+                       #only.pos = TRUE,
+                       min.pct = 0.4,
+                       min.diff.pct = 0.1, logfc.threshold = 0.25,
+                       verbose = FALSE)
+mono.de4 <- mono.de4 %>% 
+  mutate(gene = row.names(.)) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+
+DotPlot(pericytes, unique(c(mono.de0$gene, mono.de1$gene, mono.de2$gene,
+                            mono.de3$gene, mono.de4$gene)), 
+             cols=c('#6495EDFF', '#FF69B4FF'), 
+             group.by = 'seurat_clusters', split.by = 'source') +
+  ylab('Cluster') +
+  plot_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+```
+
+### GSEA
+
+```{r echo=FALSE, fig.height=8, fig.width=10}
+my_comparisons <- list(c('Pl.My.Pr.Hu', 'My.Pr.Hu'))
+
+dittoPlot(pericytes, c('REACTOME_EXTRACELLULAR_MATRIX_ORGANIZATION',
+                       'WP_CELL_CYCLE',
+                       'WP_NOTCH_SIGNALING_PATHWAY',
+                      'REACTOME_RUNX2_REGULATES_GENES_INVOLVED_IN_CELL_MIGRATION',
+                      'WP_TP53_NETWORK',
+                       'REACTOME_SIGNALING_BY_PDGF',
+                      'REACTOME_SIGNALING_BY_VEGF',
+                      'REACTOME_SIGNALING_BY_TGFB_FAMILY_MEMBERS',
+                      'WP_CYTOKINES_AND_INFLAMMATORY_RESPONSE',
+                      'WP_ANGIOGENESIS'
+                      ),
+          group.by = "source",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("p = %.2g", p),
+              step_increase = 0.2) +
+  ylim(0, 1.2) +
+  plot_theme +
+  facet_wrap(~var, labeller = c(label_change, label_wrap_gen(width=20))) +
+  ggtitle('Pericytes')
+```
+
+```{r eval=FALSE, include=FALSE}
+ES_wp <- pericytes@meta.data[, c("source", grep("^WP", names(pericytes@meta.data), value = TRUE))]
+
+output <- getSignificance(ES_wp,
+                          group = "source", 
+                          gene.sets = names(ES_wp)[2:length(ES_wp)])
+
+output %>% 
+  filter(FDR < 0.05) %>% 
+  filter(median.Pl.My.Pr.Hu - median.My.Pr.Hu > 0.05)
+```
+
+```{r eval=FALSE, include=FALSE}
+ES_go <- pericytes@meta.data[, c("source", grep("^GOBP", names(pericytes@meta.data), value = TRUE))]
+
+output <- getSignificance(ES_go,
+                          group = "source", 
+                          gene.sets = names(ES_go)[2:length(ES_go)])
+
+output %>% 
+  filter(FDR < 0.05)
+```
+
+```{r pericytes for placenta find pathways, eval=FALSE, include=FALSE}
+# pericytes$cluster3 <- ifelse(pericytes$seurat_clusters == '3', '3', 'other')
+
+gene.sets <- getGeneSets(library = "C2", subcategory = 'CP:WIKIPATHWAYS')
+
+ES <- enrichIt(obj = pericytes[["RNA"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = 15,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES$cluster <- pericytes$seurat_clusters
+
+pericytes <- AddMetaData(pericytes, ES)
+
+# output <- getSignificance(ES, 
+#                           group = "cluster3", 
+#                           gene.sets = names(ES)[1:578])
+# 
+# output %>% 
+#   filter(FDR < 0.05)
+```
+
+```{r pericytes reactome, eval=FALSE, include=FALSE}
+gene.sets <- getGeneSets(library = "C2", subcategory = 'CP:REACTOME')
+
+ES_reactome <- enrichIt(obj = pericytes[["RNA"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = 15,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES_reactome$cluster <- pericytes$seurat_clusters
+
+pericytes <- AddMetaData(pericytes, ES_reactome)
+
+# output <- getSignificance(ES_reactome, 
+#                           group = "cluster3", 
+#                           gene.sets = names(ES_reactome)[1:578])
+# 
+# output %>% 
+#   filter(FDR < 0.05)
+```
+
+```{r pericytes go, eval=FALSE, include=FALSE}
+gene.sets <- getGeneSets(library = "C5", subcategory = 'GO:BP')
+
+ES_go <- enrichIt(obj = pericytes[["RNA"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1000, cores = 15,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES_go$cluster <- pericytes$seurat_clusters
+
+pericytes <- AddMetaData(pericytes, ES_go)
+
+# output <- getSignificance(ES_reactome, 
+#                           group = "cluster3", 
+#                           gene.sets = names(ES_reactome)[1:578])
+# 
+# output %>% 
+#   filter(FDR < 0.05)
+
+saveRDS(pericytes, paste0(WORKDIR, use.name, '.pericytes.rds'))
+```
+# Analysis of Fibroblasts
+
+```{r include=FALSE}
+fibroblasts <- readRDS(paste0(WORKDIR, use.name, '.fibroblasts.rds'))
+```
+
+```{r fibroblasts preprocessing, eval=FALSE, include=FALSE}
+fibroblasts <- subset(sc, idents2 == "Fibroblasts")
+
+fibroblasts <- SCTransform(fibroblasts, return.only.var.genes = FALSE)
+
+fibroblasts <- RunPCA(fibroblasts, verbose = FALSE)
+fibroblasts <- RunUMAP(fibroblasts, reduction = "pca", dims = 1:30, verbose = FALSE)
+fibroblasts <- FindNeighbors(fibroblasts, reduction = "pca", dims = 1:20)
+fibroblasts <- FindClusters(fibroblasts, resolution = seq(0.1, 0.5, by=0.1))
+clustree(fibroblasts)
+
+Idents(fibroblasts) <- "SCT_snn_res.0.4"
+fibroblasts$seurat_clusters <- fibroblasts$SCT_snn_res.0.4
+
+dittoDimPlot(fibroblasts, reduction.use = "umap", "seurat_clusters", size = 0.5) +
+  ggtitle('By sample')
+
+dittoDimPlot(fibroblasts, reduction.use = "umap", "source", size = 0.5) +
+  ggtitle('By sample')
+```
+
+```{r cell numbers of fibroblasts, echo=FALSE}
+t <- table(fibroblasts$source) %>% 
+  as.data.frame()
+
+colnames(t) <- c('source', 'number of cells')
+
+t
+```
+
+```{r umap fibroblasts, echo=FALSE, fig.height=5, fig.width=12, message=FALSE, warning=FALSE}
+
+Idents(fibroblasts) <- "SCT_snn_res.0.2"
+fibroblasts$seurat_clusters <- fibroblasts$SCT_snn_res.0.2
+
+p1 <- dittoDimPlot(fibroblasts, reduction.use = "umap", "seurat_clusters", size = 1, 
+                   color.panel = my_colors) +
+  ggtitle('By clusters') +
+  plot_theme
+
+p2 <- dittoDimPlot(fibroblasts, reduction.use = "umap", "source", size = 1, , color.panel = my_colors) +
+  ggtitle('By source') +
+  plot_theme
+
+cowplot::plot_grid(p1, p2, 
+          #labels = c('My.Pr.Hu.1', 'Pl.My.Pr.Hu.1'),
+          nrow=1)
+#ggsave(paste0(PLOTSDIR, 'umap.png'), width=12, height=5)
+```
+
+```{r cell number fibroblasts, echo=FALSE, fig.height=4, fig.width=10.5, message=FALSE, warning=FALSE}
+p1 <- dittoBarPlot(fibroblasts, "source", group.by = "seurat_clusters", color.panel = my_colors) +
+  ggtitle('') +
+  plot_theme +
+  NoLegend()
+p2 <- dittoBarPlot(fibroblasts, "source", group.by = "seurat_clusters", 
+                   scale='count', color.panel = my_colors) +
+  ggtitle('') +
+  plot_theme
+p3 <- dittoBarPlot(fibroblasts, "seurat_clusters", group.by = "source", 
+                   color.panel = my_colors) +
+  ggtitle('') +
+  plot_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust=1)) 
+
+cowplot::plot_grid(p1, p2, p3, 
+          nrow=1, rel_widths = c(1, 1.5, 1),
+          labels = c('A', "B", "C"))
+#ggsave(paste0(PLOTSDIR, 'barplot.png'), width=12, height=5)
+```
+
+Based on the distribution of clusters by samples, clusters 3 and 5 (cells grown with the addition of placenta predominate) and clusters 6, 5 and 7 (cells grown with the addition of pericytes predominate) look the most interesting
+
+## Cell-cycle score
+
+Cluster 3 is represented by a large number of dividing cells.
+
+```{r cell-cycle score fibroblasts, echo=FALSE, fig.height=5, fig.width=14, message=FALSE, warning=FALSE}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+fibroblasts <- CellCycleScoring(fibroblasts, s.features = s.genes, g2m.features = g2m.genes)
+
+p1 <- dittoDimPlot(fibroblasts, reduction.use = "umap", "Phase", size = 0.5, split.by = 'Phase', 
+             color.panel = my_colors) +
+  ggtitle('By phase') +
+  plot_theme +
+  NoLegend()
+
+p2 <- dittoBarPlot(fibroblasts, "Phase", group.by = "seurat_clusters", color.panel = my_colors) +
+  ggtitle('') +
+  plot_theme
+
+p3 <- dittoBarPlot(fibroblasts, "Phase", group.by = "source", color.panel = my_colors) +
+  ggtitle('') +
+  plot_theme
+cowplot::plot_grid(p1, p2, p3,
+          nrow=1, rel_widths = c(1, 0.7, 0.7),
+          labels = c("A", "B", "C"))
+```
+
+This table shows how many cells in each sample are represented by cells of 3 clusters. According to the results of this table, it can be seen that indeed the addition of placenta improves cell proliferation
+
+```{r echo=FALSE, paged.print=TRUE}
+data.frame(source = c('My.Hu', 'My.Pr.Hu', 'Pl.My.Hu', 'Pl.My.Pr.Hu'),
+           percentage_of_cluster3 = c(7.5, 23.8, 7, 27.2))
+```
+
+
+```{r fibroblasts for placenta find pathways, eval=FALSE, include=FALSE}
+# fibroblasts$cluster3 <- ifelse(fibroblasts$seurat_clusters == '3', '3', 'other')
+
+gene.sets <- getGeneSets(library = "C2", subcategory = 'CP:WIKIPATHWAYS')
+
+ES <- enrichIt(obj = fibroblasts[["RNA"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = 50,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES$cluster <- fibroblasts$seurat_clusters
+
+fibroblasts <- AddMetaData(fibroblasts, ES)
+
+# output <- getSignificance(ES, 
+#                           group = "cluster3", 
+#                           gene.sets = names(ES)[1:578])
+# 
+# output %>% 
+#   filter(FDR < 0.05)
+```
+
+```{r fibroblasts reactome, eval=FALSE, include=FALSE}
+gene.sets <- getGeneSets(library = "C2", subcategory = 'CP:REACTOME')
+
+ES_reactome <- enrichIt(obj = fibroblasts[["RNA"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = 50,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES_reactome$cluster <- fibroblasts$seurat_clusters
+
+fibroblasts <- AddMetaData(fibroblasts, ES_reactome)
+
+# output <- getSignificance(ES_reactome, 
+#                           group = "cluster3", 
+#                           gene.sets = names(ES_reactome)[1:578])
+# 
+# output %>% 
+#   filter(FDR < 0.05)
+```
+
+```{r fibroblasts go, eval=FALSE, include=FALSE}
+gene.sets <- getGeneSets(library = "C5", subcategory = 'GO:BP')
+
+ES_go <- enrichIt(obj = fibroblasts[["RNA"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = 50,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES_go$cluster <- fibroblasts$seurat_clusters
+
+fibroblasts <- AddMetaData(fibroblasts, ES_go)
+
+# output <- getSignificance(ES_reactome, 
+#                           group = "cluster3", 
+#                           gene.sets = names(ES_reactome)[1:578])
+# 
+# output %>% 
+#   filter(FDR < 0.05)
+
+
+```
+
+
+```{r eval=FALSE, include=FALSE}
+ES_wiki <- readRDS(paste0(WORKDIR, use.name, 'wiki.fibroblasts.rds'))
+ES_reactome <- readRDS(paste0(WORKDIR, use.name, 'reactome.fibroblasts.rds'))
+
+fibroblasts <- AddMetaData(fibroblasts, ES_wiki)
+fibroblasts <- AddMetaData(fibroblasts, ES_reactome)
+
+saveRDS(fibroblasts, paste0(WORKDIR, use.name, '.fibroblasts.rds'))
+```
+
+## DE
+
+Markers have been defined for each cluster
+
+```{r echo=FALSE, fig.height=5, fig.width=9, message=FALSE, warning=FALSE}
+DefaultAssay(object = fibroblasts) <- "RNA"
+fibroblasts <- NormalizeData(fibroblasts)
+
+markers.fibroblasts <- FindAllMarkers(fibroblasts, only.pos = TRUE, assay = 'RNA', #min.pct = 0.25,
+                                   # min.diff.pct = 0.1, logfc.threshold = 0.25
+                                 )
+
+var_regex <-  '^HLA-|^RNA|^RP'
+var_feat <- grep(var_regex, markers.fibroblasts$gene, invert=T, value=T)
+
+top5 <- markers.fibroblasts %>% 
+  # dplyr::filter(gene %in% var_feat) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+
+
+dittoDotPlot(fibroblasts, vars = unique(top5$gene), 
+             max.color='#6495EDFF', min.color='white', 
+             group.by = 'seurat_clusters') +
+  ylab('Cluster') +
+  plot_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+```
+
+## GSEA
+
+GSEA analysis was performed to describe the interesting clusters
+
+```{r eval=FALSE, include=FALSE}
+output <- getSignificance(ES_reactome, 
+                          group = "cluster",
+                          gene.sets = names(ES_reactome)[1:length(ES_reactome)-1],
+                          fit = 'ANOVA')
+
+output %>% 
+  mutate(pathway = rownames(.)) %>% 
+  rowwise() %>% 
+  filter(p.value < 0.05) %>% 
+  filter(median.4 == max(median.0, median.1, median.2, median.3, median.4,
+                         median.5, median.6, median.7, median.8)) %>% 
+  # filter(median.8 - max(median.7, median.0, median.1, median.2, 
+  #                       median.3, median.4, median.5, median.6) > 0.05) %>% 
+  select(pathway)
+```
+
+### Cluster 3
+
+Enriched pathways associated with the cell cycle and cell proliferation are observed in cluster 3. There is also a high level of enrichment for cell-cell communications.  Also, the activity of the WNT pathway is increased in all clusters of interest (3, 6, 7, 8)
+
+```{r echo=FALSE, fig.height=6, fig.width=9}
+dittoPlot(fibroblasts, c(
+                      'WP_CELL_CYCLE',
+                      'WP_G1_TO_S_CELL_CYCLE_CONTROL',
+                      'REACTOME_CELL_CYCLE',
+                      'WP_INTEGRINMEDIATED_CELL_ADHESION',
+                      'WP_WNT_SIGNALING_PATHWAY',
+                      'REACTOME_CELL_CELL_COMMUNICATION'
+                       ),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  ylim(0, 1) +
+  plot_theme +
+  facet_wrap(~var, labeller = as_labeller(label_change, label_wrap_gen(width=20))) +
+  ggtitle("Fibroblasts")
+```
+
+### Cluster 6
+
+In cluster 6, there is an increased enrichment of the TP53 signaling pathway associated with the cellular response to stress and complement and coagulation processes. Cluster 6 cells are predominantly represented by cells grown with the addition of pericytes. Perhaps the addition of pericytes increases stress.
+
+```{r echo=FALSE, fig.height=4, fig.width=8}
+dittoPlot(fibroblasts, c(
+                      'WP_COMPLEMENT_AND_COAGULATION_CASCADES',
+                      'WP_TP53_NETWORK'
+                       ),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  ylim(0, 1) +
+  plot_theme +
+  facet_wrap(~var, labeller = as_labeller(label_change, label_wrap_gen(width=20))) +
+  ggtitle("Fibroblasts")
+```
+
+### Cluster 7
+
+Cluster 7 is characterized by high involvement in the processes of ECM formation, especially laminin interactions. There is an increased activity of the PDGF pathway.
+
+
+```{r echo=FALSE, fig.height=6, fig.width=8}
+dittoPlot(fibroblasts, c(
+                      
+                      'WP_MIRNA_TARGETS_IN_ECM_AND_MEMBRANE_RECEPTORS',
+                      'REACTOME_COLLAGEN_BIOSYNTHESIS_AND_MODIFYING_ENZYMES',
+                      'REACTOME_ECM_PROTEOGLYCANS',
+                      'REACTOME_LAMININ_INTERACTIONS',
+                      'REACTOME_SIGNALING_BY_PDGF'
+                       ),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  ylim(0, 1) +
+  plot_theme +
+  facet_wrap(~var, labeller = as_labeller(label_change, label_wrap_gen(width=20))) +
+  ggtitle("Fibroblasts")
+```
+
+### Cluster 8
+
+Inflammatory processes and signaling pathways associated with interferons are increased in cluster 8.
+
+```{r echo=FALSE, fig.height=4, fig.width=8}
+dittoPlot(fibroblasts, c(
+                      'WP_CYTOKINES_AND_INFLAMMATORY_RESPONSE',
+                      'WP_TYPE_III_INTERFERON_SIGNALING',
+                      'WP_OVERVIEW_OF_INTERFERONSMEDIATED_SIGNALING_PATHWAY'
+                       ),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  ylim(0, 1) +
+  plot_theme +
+  facet_wrap(~var, labeller = as_labeller(label_change, label_wrap_gen(width=20))) +
+  ggtitle("Fibroblasts")
+```
+
+In conclusion, it can be said that the placenta enhances the proliferation of fibroblasts. The addition of pericytes improves the formation of EСM, as well as enhances the PDGF signaling pathway. However, the addition of pericytes also increases the enrichment of inflammatory processes.
+
+Both with the addition of pericytes and placenta, an increase in the enrichment of the WNT signaling pathway was observed.
+
+## By samples
+
+### GSEA
+
+```{r echo=FALSE, fig.height=8, fig.width=10}
+my_comparisons <- list(c('My.Hu', 'My.Pr.Hu'), c('My.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'My.Pr.Hu'))
+
+dittoPlot(fibroblasts, c('REACTOME_CELL_CYCLE',
+                       'WP_CELL_CYCLE',
+                       'WP_WNT_SIGNALING_PATHWAY',
+                      'WP_COMPLEMENT_AND_COAGULATION_CASCADES',
+                      'WP_TP53_NETWORK',
+                       'REACTOME_COLLAGEN_BIOSYNTHESIS_AND_MODIFYING_ENZYMES',
+                      'REACTOME_ECM_PROTEOGLYCANS',
+                      'REACTOME_LAMININ_INTERACTIONS',
+                      'REACTOME_SIGNALING_BY_PDGF',
+                      'WP_CYTOKINES_AND_INFLAMMATORY_RESPONSE',
+                      'WP_TYPE_III_INTERFERON_SIGNALING'
+                      ),
+          group.by = "source",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("p = %.2g", p),
+              step_increase = 0.2) +
+  ylim(0, 2) +
+  plot_theme +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  facet_wrap(~var, labeller = as_labeller(label_change, label_wrap_gen(width=20))) +
+  ggtitle('Fibroblasts')
+```
+### DE
+
+```{r echo=FALSE, fig.height=10, fig.width=8, message=FALSE, warning=FALSE}
+fibroblasts$cluster_source <- paste(fibroblasts$seurat_clusters, fibroblasts$source, sep = "_")
+Idents(fibroblasts) <- "cluster_source"
+
+mono.de0 <- FindMarkers(fibroblasts,
+                       ident.1 = "0_Pl.My.Pr.Hu",
+                       ident.2 = "0_My.Hu",
+                       #only.pos = TRUE,
+                       min.pct = 0.4,
+                       min.diff.pct = 0.1, logfc.threshold = 0.25,
+                       verbose = FALSE)
+mono.de0 <- mono.de0 %>% 
+  mutate(gene = row.names(.)) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+  
+mono.de1 <- FindMarkers(fibroblasts,
+                       ident.1 = "1_Pl.My.Pr.Hu",
+                       ident.2 = "1_My.Hu",
+                       #only.pos = TRUE,
+                       min.pct = 0.4,
+                       min.diff.pct = 0.1, logfc.threshold = 0.25,
+                       verbose = FALSE)
+mono.de1 <- mono.de1 %>% 
+  mutate(gene = row.names(.)) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+
+mono.de2 <- FindMarkers(fibroblasts,
+                       ident.1 = "2_Pl.My.Pr.Hu",
+                       ident.2 = "2_My.Hu",
+                       #only.pos = TRUE,
+                       min.pct = 0.4,
+                       min.diff.pct = 0.1, logfc.threshold = 0.25,
+                       verbose = FALSE)
+mono.de2 <- mono.de2 %>% 
+  mutate(gene = row.names(.)) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+
+mono.de3 <- FindMarkers(fibroblasts,
+                       ident.1 = "3_Pl.My.Pr.Hu",
+                       ident.2 = "3_My.Hu",
+                       #only.pos = TRUE,
+                       min.pct = 0.4,
+                       min.diff.pct = 0.1, logfc.threshold = 0.25,
+                       verbose = FALSE)
+mono.de3 <- mono.de3 %>% 
+  mutate(gene = row.names(.)) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+
+mono.de4 <- FindMarkers(fibroblasts,
+                       ident.1 = "4_Pl.My.Pr.Hu",
+                       ident.2 = "4_My.Hu",
+                       #only.pos = TRUE,
+                       min.pct = 0.4,
+                       min.diff.pct = 0.1, logfc.threshold = 0.25,
+                       verbose = FALSE)
+mono.de4 <- mono.de4 %>% 
+  mutate(gene = row.names(.)) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+
+mono.de5 <- FindMarkers(fibroblasts,
+                       ident.1 = "5_My.Pr.Hu",
+                       ident.2 = "5_My.Hu",
+                       #only.pos = TRUE,
+                       min.pct = 0.4,
+                       min.diff.pct = 0.1, logfc.threshold = 0.25,
+                       verbose = FALSE)
+mono.de5 <- mono.de5 %>% 
+  mutate(gene = row.names(.)) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+
+mono.de6 <- FindMarkers(fibroblasts,
+                       ident.1 = "4_Pl.My.Pr.Hu",
+                       ident.2 = "4_My.Hu",
+                       #only.pos = TRUE,
+                       min.pct = 0.4,
+                       min.diff.pct = 0.1, logfc.threshold = 0.25,
+                       verbose = FALSE)
+mono.de6 <- mono.de6 %>% 
+  mutate(gene = row.names(.)) %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+
+DotPlot(fibroblasts, unique(c(mono.de0$gene, mono.de1$gene, mono.de2$gene,
+                            mono.de3$gene, mono.de4$gene)), 
+             cols=c('#6495EDFF', '#FF69B4FF', "#BA55D3FF",  "#32CD32FF"), 
+             group.by = 'seurat_clusters', split.by = 'source') +
+  ylab('Cluster') +
+  plot_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+```
+
+```{r eval=FALSE, fig.height=4, fig.width=14, include=FALSE}
+placenta <- subset(sc, idents2 == "Placenta")
+gene.sets <- getGeneSets(library = "C5", subcategory = 'GO:BP')
+
+ES_go <- enrichIt(obj = placenta[["RNA"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = 15,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES_go$cluster <- placenta$seurat_clusters
+
+placenta <- AddMetaData(placenta, ES_go)
+
+dittoPlot(placenta, c('GOBP_EXTRACELLULAR_MATRIX_ASSEMBLY' ),
+          plots = c("boxplot"), group.by = 'source') + 
+  scale_fill_manual(values = my_colors) +
+  ylim(0, 1.4) +
+  plot_theme
+
+DotPlot(sc, features = gene.sets['GOBP_EXTRACELLULAR_MATRIX_ASSEMBLY']@.Data[[1]]@geneIds) + RotatedAxis()
+```
+
+```{r eval=FALSE, fig.height=8, fig.width=13, include=FALSE}
+my_comparisons <- list(c('My.Hu', 'My.Pr.Hu'), c('My.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'My.Pr.Hu'))
+
+dittoPlot(huvec, c(
+                      'REACTOME_COLLAGEN_BIOSYNTHESIS_AND_MODIFYING_ENZYMES',
+                      'REACTOME_COLLAGEN_FORMATION',
+                      'REACTOME_DEGRADATION_OF_THE_EXTRACELLULAR_MATRIX',
+                      'REACTOME_EXTRACELLULAR_MATRIX_ORGANIZATION'
+                      ),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("p = %.2g", p),
+              step_increase = 0.2) +
+  ylim(0, 1.8) +
+  plot_theme +
+  facet_wrap(~var, labeller = as_labeller(label_change, label_wrap_gen(width=30)))
+```
+
+```{r eval=FALSE, fig.height=6, fig.width=9, message=FALSE, warning=FALSE, include=FALSE}
+my_comparisons <- list(c('My.Hu', 'My.Pr.Hu'), c('My.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'My.Pr.Hu'))
+
+dittoPlot(huvec, c(
+                      'GOBP_POSITIVE_REGULATION_OF_BLOOD_VESSEL_ENDOTHELIAL_CELL_PROLIFERATION_INVOLVED_IN_SPROUTING_ANGIOGENESIS',
+                      'GOBP_BLOOD_VESSEL_ENDOTHELIAL_CELL_PROLIFERATION_INVOLVED_IN_SPROUTING_ANGIOGENESIS'
+                      ),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("p = %.2g", p),
+              step_increase = 0.15) +
+  scale_fill_manual(values = my_colors) +
+  ylim(0, 1.8) +
+  plot_theme +
+  facet_wrap(~var, labeller = as_labeller(label_change, label_wrap_gen(width=30)))
+```
+
+# Placenta cells
+
+Placenta cells additionaly secrete various ECM proteins that provide structural support and can influence muscle cell behavior.
+
+```{r placenta ECM, echo=FALSE}
+dittoPlot(sc, c('FN1', 'COL6A1', 'COL6A2', 'COL6A3',
+                'LAMA2', 'LAMA4', 'LAMA4', 'LAMB1', 'LAMC1'),
+          group.by = "idents2",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  ylim(0, 1.8) +
+  plot_theme +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  facet_wrap(~var, labeller = as_labeller(label_change, label_wrap_gen(width=30)))
+```
+
+```{r eval=FALSE, include=FALSE}
+VlnPlot(fibroblasts, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", 'complexity', 'percent.ribo'), ncol = 3)
+```
+
+```{r eval=FALSE, include=FALSE}
+pericytes.sce <- as.SingleCellExperiment(pericytes)
+pericytes.sce$seurat_clusters <- pericytes.sce$SCT_snn_res.0.2
+dbl.out <- findDoubletClusters(pericytes.sce, clusters = pericytes.sce$seurat_clusters)
+
+rownames(dbl.out)[isOutlier(dbl.out$num.de, type="lower", log=TRUE)]
+```
+
+```{r eval=FALSE, include=FALSE}
+genes <- markers.fibroblasts %>% 
+  filter(p_val_adj < 0.05) %>% 
+  mutate(ENTREZID =  mapIds(org.Hs.eg.db, 
+                              keys = gene, 
+                              column = "ENTREZID", 
+                              keytype = "SYMBOL")) %>% 
+  filter(cluster == '5')
+ego <- enrichGO(genes$ENTREZID, org.Hs.eg.db, 
+                   ont = "ALL")
+
+barplot(ego)
+```
+
+
+```{r echo=FALSE, fig.height=8, fig.width=10}
+my_comparisons <- list(c('My.Hu', 'My.Pr.Hu'), c('My.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'My.Pr.Hu'))
+dittoPlot(huvec, c('WP_CELLS_AND_MOLECULES_INVOLVED_IN_LOCAL_ACUTE_INFLAMMATORY_RESPONSE',
+'WP_CYTOKINES_AND_INFLAMMATORY_RESPONSE',
+'WP_INFLAMMATORY_RESPONSE_PATHWAY',
+'REACTOME_INFLAMMASOMES'
+                      ),
+          group.by = "source",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("p = %.2g", p),
+              step_increase = 0.2) +
+  ylim(0, 2) +
+  plot_theme +
+  facet_wrap(~var, labeller = as_labeller(label_change, label_wrap_gen(width=20))) +
+  ggtitle('Pericytes')
+```
+
+
+# Enrichment
+```{r}
+gene <- markers.source_vs %>% 
+  filter(p_val <= 0.05) %>% 
+  dplyr::mutate(ENTREZID =  mapIds(org.Hs.eg.db, 
+                            keys = gene, 
+                            column = "ENTREZID", 
+                            keytype = "SYMBOL"))
+
+kk <- enrichKEGG(gene = gene$ENTREZID,
+                 organism = 'hsa',
+                 pvalueCutoff = 1)
+
+go <- enrichGO(gene          = gene$ENTREZID,
+                OrgDb         = org.Hs.eg.db,
+                ont           = "MF",
+        readable      = TRUE,
+        pvalueCutoff = 1)
+
+wp_enr <- enrichWP(gene$ENTREZID, organism = "Homo sapiens", pvalueCutoff = 1) 
+
+library(ReactomePA)
+react <- enrichPathway(gene=gene$ENTREZID, pvalueCutoff = 1, readable=TRUE)
+
+```
+
+```{r fig.height=7}
+barplot(wp_enr, showCategory=10 ) +
+  ggtitle('Wiki')
+
+barplot(kk, showCategory=10 ) +
+  ggtitle('KEGG')
+
+barplot(go, showCategory=10 ) +
+  ggtitle('GO:MF')
+
+barplot(react, showCategory=10 ) +
+  ggtitle('Reactome')
+```
+

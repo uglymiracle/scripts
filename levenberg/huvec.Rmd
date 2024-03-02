@@ -1,0 +1,353 @@
+---
+title: "huvec_analysis"
+output: html_document
+date: "2023-01-10"
+---
+
+```{r setup, include=FALSE, message = FALSE, warning = FALSE, include = FALSE }
+knitr::opts_chunk$set()
+if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+if (!requireNamespace("igraph", quietly = TRUE)) install.packages('igraph', repos='http://cran.rstudio.com/')
+if (!requireNamespace("dittoSeq", quietly = TRUE)) BiocManager::install("dittoSeq")
+library(dittoSeq)
+if (!requireNamespace("celldex", quietly = TRUE)) BiocManager::install("celldex")
+library(celldex)
+if (!requireNamespace("devtools", quietly = TRUE)) install.packages("devtools")
+if (!requireNamespace("Seurat", quietly = TRUE)) install.packages("Seurat")
+library(Seurat)
+if (!requireNamespace("clusterProfiler", quietly = TRUE)) BiocManager::install("clusterProfiler")
+library(clusterProfiler)
+if (!requireNamespace("plyr", quietly = TRUE)) install.packages("plyr")
+library(plyr)
+if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
+library(dplyr)
+library("BiocParallel")
+library(future)
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) BiocManager::install("org.Hs.eg.db")
+library(org.Hs.eg.db)
+if (!requireNamespace("clustree", quietly = TRUE)) install.packages('clustree')
+library(clustree)
+if (!requireNamespace("monocle3", quietly = TRUE)) 
+  BiocManager::install(c('BiocGenerics', 'DelayedArray', 'DelayedMatrixStats',
+                       'limma', 'lme4', 'S4Vectors', 'SingleCellExperiment',
+                       'SummarizedExperiment', 'batchelor', 'HDF5Array',
+                       'terra', 'ggrastr')) #it's for monocle3
+if (!requireNamespace("monocle3", quietly = TRUE)) 
+  devtools::install_github('cole-trapnell-lab/monocle3')
+library(monocle3)
+if (!requireNamespace("remotes", quietly = TRUE)) install.packages('remotes')
+if (!requireNamespace("R.utils", quietly = TRUE)) install.packages('R.utils')
+if (!requireNamespace("SeuratWrappers", quietly = TRUE)) 
+  remotes::install_github('satijalab/seurat-wrappers')
+library(SeuratWrappers)
+if (!requireNamespace("escape", quietly = TRUE)) BiocManager::install("escape")
+library(escape)
+if (!requireNamespace("destiny", quietly = TRUE)) BiocManager::install("destiny")
+library(destiny)
+if (!requireNamespace("presto", quietly = TRUE))
+  devtools::install_github('immunogenomics/presto')
+if (!requireNamespace("slingshot", quietly = TRUE)) BiocManager::install("kstreet13/slingshot")
+library(slingshot)
+if (!requireNamespace("mclust", quietly = TRUE)) install.packages("mclust")
+library(mclust)
+if(!require("pacman")) install.packages("pacman")
+pacman::p_load(ggthemes)
+library(ggbeeswarm)
+library(data.table)
+if (!requireNamespace("TSCAN", quietly = TRUE)) BiocManager::install("TSCAN")
+library(TSCAN)
+if (!requireNamespace("ggplotify", quietly = TRUE)) install.packages("ggplotify")
+library(ggplotify)
+library(grid)
+if (!requireNamespace("tradeSeq", quietly = TRUE)) BiocManager::install("tradeSeq")
+library(tradeSeq)
+library(forcats)
+if (!requireNamespace("scran", quietly = TRUE)) BiocManager::install("scran")
+library(scran)
+library(ggpubr)
+library(rstatix)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+###################################################################################
+WORKDIR <- '~/levenberg/'
+PLOTSDIR <- '~/levenberg/plots/'
+use.name <- 'huvec'
+
+set.seed(555)
+
+CPU <- 8
+###################################################################################
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+my_colors <- c("#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#32CD32FF",  "#F08080FF",
+               "#9ACD32FF", "#4682B4FF",
+               "#40E0D0FF",  "#F0E68CFF", "#D2B48CFF", "#8FBC8BFF", 
+               "#DDA0DDFF", "#5F9EA0FF", "#FFDAB9FF", "#FFA07AFF", "#87CEEBFF")
+
+plot_theme = theme_classic(base_size=12, base_family = 'Helvetica') + 
+             theme(plot.title = element_text(size = 14, face = 'bold')
+                   )
+```
+
+
+# Analysis of the effect of placental cells on the growth of huvec
+
+```{r read data, include=FALSE}
+sc <- readRDS(paste0(WORKDIR, 'sc_2samples.rds'))
+huvec <- subset(sc, idents == "HUVEC")
+# saveRDS(huvec, paste0(WORKDIR, 'huvec.rds'))
+# huvec <- readRDS(paste0(WORKDIR, 'huvec.rds'))
+# huvec_pl <- subset(huvec, subset = source == 'Pl.My.Pr.Hu.1' | source == 'My.Pr.Hu.1')
+# huvec_all <- huvec
+# huvec <- huvec_pl
+```
+
+
+
+```{r preprocessing, message=FALSE, warning=FALSE, include=FALSE}
+# huvec[["complexity"]] <- log10(huvec$nFeature_RNA) / log10(huvec$nCount_RNA)
+VlnPlot(huvec, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.ribo", "complexity"), ncol = 5)
+
+# huvec <- FindVariableFeatures(huvec, selection.method = "vst", nfeatures = 4000, assay = 'SCT')
+# var_feat <- VariableFeatures(huvec)
+# var_regex <-  '^HLA-|^IG[HJKL]|^RNA|^MT|^RP'
+# var_feat <- grep(var_regex, var_feat, invert=T, value=T)
+#huvec <- RunPCA(huvec, verbose = FALSE, features = var_feat)
+
+# huvec$SCT_snn_res.1 <- NULL
+huvec <- RunPCA(huvec, verbose = FALSE)
+huvec <- RunUMAP(huvec, reduction = "pca", dims = 1:30, verbose = FALSE)
+# huvec <- FindNeighbors(huvec, reduction = "pca", dims = 1:30)
+# huvec <- FindClusters(huvec, resolution = seq(0.1, 0.6, by=0.1))
+# clustree(huvec)
+
+Idents(huvec) <- "source"
+huvec$seurat_clusters <- huvec$source
+
+dittoDimPlot(huvec, reduction.use = "umap", var = "nFeature_RNA", size = 0.5) +
+  dittoDimPlot(huvec, reduction.use = "umap", var = "nCount_RNA", size = 0.5) +
+  dittoDimPlot(huvec, reduction.use = "umap", var = "percent.mt", size = 0.5)
+
+dittoDimPlot(huvec, reduction.use = "umap", "source", size = 0.5, split.by = 'source') +
+  ggtitle('By sample')
+
+# dittoDimPlot(huvec, reduction.use = "umap", "source", size = 0.5, split.by = 'SCT_snn_res.0.6') +
+#  ggtitle('Clusters by source')
+
+huvec_heatmap <- SCTransform(huvec, return.only.var.genes = FALSE) 
+```
+
+In the initial phase, myoblast clustering was performed from two experiments 
+(Pl.My.Pr.Hu.1, My.Pr.Hu.1), resulting in ten clusters. There are 3159 cells in total in the 
+analysis. 
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=TRUE}
+t <- table(huvec$source) %>% 
+  as.data.frame()
+
+colnames(t) <- c('source', 'number of cells')
+
+t
+```
+
+```{r echo=FALSE, fig.height=4, fig.width=6, message=FALSE, warning=FALSE}
+dittoDimPlot(huvec, reduction.use = "umap", "source", size = 1, , color.panel = my_colors) +
+  ggtitle('By source') +
+  plot_theme
+```
+
+## Markers 
+```{r}
+FeaturePlot(huvec, features = c('PECAM1'))
+```
+
+## Differential expression (DE)
+
+Markers have been defined for each source.
+
+```{r markers, echo=FALSE, fig.height=4, fig.width=9, message=FALSE, warning=FALSE}
+markers.source <- FindAllMarkers(huvec, only.pos = TRUE, #min.pct = 0.25,
+                                   # min.diff.pct = 0.1, logfc.threshold = 0.25
+                                 )
+
+top10 <- markers.source %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>% 
+  top_n(n = 10, wt = avg_log2FC)
+
+
+dittoDotPlot(huvec, vars = unique(top10$gene), 
+             max.color='#6495EDFF', min.color='white', 
+             group.by = 'seurat_clusters', scale =F) +
+  ylab('Source') +
+  plot_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+
+# VlnPlot(huvec, features = unique(top5$gene), group.by = "SCT_snn_res.0.2") 
+#ggsave(paste0(PLOTSDIR, 'DEG.png'), width=8, height=4)
+```
+
+```{r heatmap, echo=FALSE, fig.height=7, fig.width=8, message=FALSE, warning=FALSE}
+DoHeatmap(huvec_heatmap, features = unique(top10$gene), group.by = 'source') +
+  scale_fill_gradientn(colors = c("#6495EDFF", "white", "#FF69B4FF")) +
+  theme(axis.text = element_text(size = 10))
+```
+#TEMP
+```{r}
+my_comparisons = list(c('Pl.My.Pr.Hu','My.Pr.Hu'))
+p1 <- dittoPlot(huvec, "VEGFA", group.by = "seurat_clusters", plots = c('boxplot'),
+          jitter.size = 0) +
+  NoLegend() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("*p = %.2g", p),
+              step_increase = 0.15) +
+  ylim(0, 2)
+
+p2 <- dittoPlot(huvec, "FGF2", group.by = "seurat_clusters", plots = c('boxplot'),
+          jitter.size = 0) +
+  NoLegend() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("**p = %.2g", p),
+              step_increase = 0.15) +
+  ylim(0, 2)
+
+
+p3 <- dittoPlot(huvec, "ANGPT2", group.by = "seurat_clusters", plots = c('boxplot'),
+          jitter.size = 0) +
+  NoLegend() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("***p = %.2g", p),
+              step_increase = 0.15) +
+  ylim(0, 3.5)
+
+p4 <- dittoPlot(huvec, "ANG", group.by = "seurat_clusters", plots = c('boxplot'),
+          jitter.size = 0) +
+  NoLegend() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("ns", p),
+              step_increase = 0.15) +
+  ylim(0, 3.5)
+
+p5 <- dittoPlot(huvec, "PDGFB", group.by = "seurat_clusters", plots = c('boxplot'),
+          jitter.size = 0) +
+  NoLegend() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("ns", p),
+              step_increase = 0.15) +
+  ylim(0, 3.5)
+
+cowplot::plot_grid(p1, p2, p3, p4, p5, 
+          nrow=2)
+```
+
+## GSEA
+
+According to the results of the enrichment analysis, it is observed that cluster 3 is represented by actively dividing cells. We are observing the enrichment of processes related to cell division and DNA replication.
+
+```{r GSEA, message=FALSE, warning=FALSE, include=FALSE}
+gene.sets <- getGeneSets(library = "H")
+
+ES <- enrichIt(obj = huvec[["SCT"]]$counts,
+               gene.sets = gene.sets,
+               groups = 1500, cores = CPU,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES$cluster <- huvec$seurat_clusters
+# 
+# write.table(ES, paste0(WORKDIR, use.name, '_GSEA.tsv'))
+# ES <- fread(paste0(WORKDIR, use.name, '_GSEA.tsv')) %>% 
+#   as.data.frame()
+huvec <- AddMetaData(huvec, ES)
+```
+
+```{r}
+ES$cluster <- as.factor(ES$cluster)
+output <- getSignificance(ES, 
+                          group = "cluster", 
+                          gene.sets = names(ES)[1:50],
+                          fit = "Wilcoxon")
+
+output %>% 
+  filter(FDR < 0.05)
+```
+
+
+```{r GSEA, message=FALSE, warning=FALSE, include=FALSE}
+gene.sets_reactome <- getGeneSets(library = "C2", subcategory = 'CP:REACTOME')
+
+ES_reactome <- enrichIt(obj = huvec[["SCT"]]$counts,
+               gene.sets = gene.sets_reactome,
+               groups = 1500, cores = CPU,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+
+ES_reactome$cluster <- huvec$seurat_clusters
+# 
+# write.table(ES, paste0(WORKDIR, use.name, '_GSEA.tsv'))
+# ES <- fread(paste0(WORKDIR, use.name, '_GSEA.tsv')) %>% 
+#   as.data.frame()
+huvec <- AddMetaData(huvec, ES_reactome)
+```
+
+```{r}
+ES_reactome$cluster <- as.factor(ES_reactome$cluster)
+output_reactome <- getSignificance(ES_reactome, 
+                          group = "cluster", 
+                          gene.sets = names(ES_reactome)[1:1491],
+                          fit = "Wilcoxon")
+
+output_reactome %>% 
+  filter(FDR < 0.05)
+```
+
+```{r GSEA, message=FALSE, warning=FALSE, include=FALSE}
+gene.sets_wiki <- getGeneSets(library = "C2", subcategory = 'CP:WIKIPATHWAYS')
+
+ES_wiki <- enrichIt(obj = huvec[["SCT"]]$counts,
+               gene.sets = gene.sets_wiki,
+               groups = 1500, cores = CPU,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+
+ES_wiki$cluster <- huvec$seurat_clusters
+# 
+# write.table(ES, paste0(WORKDIR, use.name, '_GSEA.tsv'))
+# ES <- fread(paste0(WORKDIR, use.name, '_GSEA.tsv')) %>% 
+#   as.data.frame()
+huvec <- AddMetaData(huvec, ES_wiki)
+```
+
+```{r}
+ES_wiki$cluster <- as.factor(ES_wiki$cluster)
+output_reactome <- getSignificance(ES_wiki, 
+                          group = "cluster", 
+                          gene.sets = names(ES_wiki)[1:635],
+                          fit = "Wilcoxon")
+
+output_reactome %>% 
+  filter(FDR < 0.05)
+```
+
+
+```{r echo=FALSE, fig.height=6, fig.width=10, message=FALSE, warning=FALSE}
+dittoPlot(huvec, c( "HALLMARK_ANGIOGENESIS", 
+                        # "HALLMARK_DNA_REPAIR",
+                        # "HALLMARK_G2M_CHECKPOINT",
+                        "REACTOME_SIGNALING_BY_VEGF",
+                    'WP_ANGIOGENESIS', 'HALLMARK_APOPTOSIS',
+                    'REACTOME_CELL_SURFACE_INTERACTIONS_AT_THE_VASCULAR_WALL'),
+          group.by = "seurat_clusters",
+          plots = c("boxplot")) + 
+  scale_fill_manual(values = my_colors) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = function(p) sprintf("p = %.2g", p),
+              step_increase = 0.15) +
+  ylim(0, 1.2) +
+  plot_theme
+```

@@ -1,0 +1,171 @@
+---
+title: "annotate_preprop"
+output: html_document
+date: "2024-01-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+if (!requireNamespace("dittoSeq", quietly = TRUE)) BiocManager::install("dittoSeq")
+library(dittoSeq)
+if (!requireNamespace("celldex", quietly = TRUE)) BiocManager::install("celldex")
+library(celldex)
+if (!requireNamespace("devtools", quietly = TRUE)) install.packages("devtools")
+if (!requireNamespace("DoubletFinder", quietly = TRUE))  remotes::install_github('chris-mcginnis-ucsf/DoubletFinder')
+library(DoubletFinder)
+if (!requireNamespace("cowplot", quietly = TRUE)) install.packages("cowplot")
+library(cowplot)
+if (!requireNamespace("corrplot", quietly = TRUE)) install.packages("corrplot")
+library(corrplot)
+if (!requireNamespace("ggtree", quietly = TRUE)) BiocManager::install("ggtree")
+library(ggtree)
+if (!requireNamespace("SingleR", quietly = TRUE)) BiocManager::install("SingleR")
+library(SingleR)
+if (!requireNamespace("Seurat", quietly = TRUE)) install.packages("Seurat")
+library(Seurat)
+if (!requireNamespace("clusterProfiler", quietly = TRUE)) BiocManager::install("clusterProfiler")
+library(clusterProfiler)
+if (!requireNamespace("plyr", quietly = TRUE)) install.packages("plyr")
+library(plyr)
+if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
+library(dplyr)
+library(scuttle)
+library("BiocParallel")
+library(future)
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) BiocManager::install("org.Hs.eg.db")
+```
+
+```{r}
+###################################################################################
+WORKDIR <- '~/levenberg/'
+PLOTSDIR <- '~/levenberg/plots/'
+use.name <- 'All2'
+
+set.seed(555)
+
+CPU <- 8
+###################################################################################
+```
+
+# Read data
+```{r eval=FALSE, include=FALSE}
+sc1 <- Read10X_h5(paste0(WORKDIR, 'data/filtered_feature_bc_matrix_SL111_old.h5'))
+sc2 <- Read10X_h5(paste0(WORKDIR, 'data/filtered_feature_bc_matrix_SL112_old.h5'))
+sc5 <- Read10X_h5(paste0(WORKDIR, 'data/filtered_feature_bc_matrix_SL111.h5'))
+sc6 <- Read10X_h5(paste0(WORKDIR, 'data/filtered_feature_bc_matrix_SL112.h5'))
+
+sc1 <- sc1[,intersect(colnames(sc1), colnames(sc5))]+sc5[,intersect(colnames(sc1), colnames(sc5))]
+sc2 <- sc2[,intersect(colnames(sc2), colnames(sc6))]+sc6[,intersect(colnames(sc2), colnames(sc6))]
+```
+
+```{r}
+raw <- cbind(sc1,
+             sc2)
+
+colnames(raw) = make.unique(colnames(raw))
+
+source <- c(rep('Pl.My.Pr.Hu', ncol(sc1)), #Myocytes + Pericytes + HUVEC + Placenta (batch1)
+            rep('My.Pr.Hu', ncol(sc2))) #Myocytes + Pericytes + HUVEC (batch1)
+```
+
+# Preprocessing
+```{r}
+sc <- CreateSeuratObject(raw, project = "muscle", min.cells = 10, min.features = 200)
+names(source) <- colnames(sc)
+sc$source <- source[colnames(sc)]
+sc[["percent.mt"]] <- PercentageFeatureSet(sc, pattern = "^MT-")
+sc[["percent.ribo"]] <- PercentageFeatureSet(sc, pattern = "^RP[SL]")
+sc[["complexity"]] <- log10(sc$nFeature_RNA) / log10(sc$nCount_RNA)
+
+VlnPlot(sc, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.ribo", "complexity"), 
+        ncol = 5)
+
+sc <- subset(sc, subset = percent.mt < 8 & percent.ribo > 10 & complexity > 0.8 & nFeature_RNA < 5000)
+
+sc <- SCTransform(sc)
+
+sc <- RunPCA(sc)
+sc <- RunUMAP(sc, reduction = "pca", dims = 1:30)
+sc <- FindNeighbors(sc, dims = 1:30)
+sc <- FindClusters(sc, resolution = seq(0.1, 1.5, by=0.1))
+
+dittoDimPlot(sc, reduction.use = "umap", 'source', size = 0.5) 
+```
+
+#Ierar clustering
+```{r}
+clustree(sc)
+dittoDimPlot(sc, reduction.use = "umap", 'source', size = 0.5) 
+dittoDimPlot(sc, reduction.use = "umap", 'SCT_snn_res.0.1', size = 0.5) 
+```
+```{r}
+dittoBarPlot(sc, "source", group.by = "SCT_snn_res.0.1", color.panel = my_colors) +
+  ggtitle('') +
+  plot_theme 
+```
+
+# Markers
+```{r}
+Idents(sc) <- sc$SCT_snn_res.0.1
+markers.cluster <- FindAllMarkers(sc, only.pos = TRUE, min.pct = 0.25,
+                                  min.diff.pct = 0.1, logfc.threshold = 0.25)
+
+top7 <- markers.cluster %>% 
+  group_by(cluster) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+dittoDotPlot(sc, vars = unique(top7$gene), group.by = "SCT_snn_res.0.1", 
+                   max.color='blue', min.color='white', scale=F) +
+  ylab('Clusters')
+```
+
+```{r}
+FeaturePlot(sc, features = c('PECAM1'))
+```
+
+```{r}
+FeaturePlot(sc, features = c('THY1'))
+```
+
+```{r}
+new.cluster.ids <- c('0'='Pericytes',
+                     '1'='Pericytes',
+                     '2'='Pericytes',
+                     '3'='Placenta',
+                     '4'='Pericytes',
+                     '5'='HUVEC')
+
+new.cluster.ids2 <- new.cluster.ids
+new.cluster.ids <- make.unique(new.cluster.ids)
+names(new.cluster.ids) <- levels(sc)
+sc <- RenameIdents(sc, new.cluster.ids)
+sc$idents <- sc@active.ident
+
+saveRDS(sc, paste0(WORKDIR, 'sc_2samples.rds'))
+```
+
+# Integrate
+```{r}
+obj <- CreateSeuratObject(raw, project = "muscle", min.cells = 10, min.features = 200)
+names(source) <- colnames(obj)
+obj$source <- source[colnames(obj)]
+obj[["RNA"]] <- split(obj[["RNA"]], f = obj$source)
+
+obj <- SCTransform(obj)
+obj <- RunPCA(obj, npcs = 30, verbose = F)
+obj <- IntegrateLayers(
+  object = obj,
+  method = RPCAIntegration,
+  normalization.method = "SCT",
+  verbose = F
+)
+obj <- RunUMAP(obj, reduction = "pca", dims = 1:30)
+obj <- FindNeighbors(obj, dims = 1:30, reduction = "integrated.dr")
+obj <- FindClusters(obj, resolution = seq(0.1, 0.6, by=0.1))
+```
+```{r}
+clustree(obj)
+dittoDimPlot(obj, reduction.use = "umap", 'source', size = 0.5) 
+dittoDimPlot(obj, reduction.use = "umap", 'SCT_snn_res.0.3', size = 0.5) 
+```
+

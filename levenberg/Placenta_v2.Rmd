@@ -1,0 +1,688 @@
+---
+title: "placenta_proliferation"
+output:
+  html_document: default
+  pdf_document: default
+date: "2024-02-11"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+if (!requireNamespace("dittoSeq", quietly = TRUE)) BiocManager::install("dittoSeq")
+library(dittoSeq)
+if (!requireNamespace("celldex", quietly = TRUE)) BiocManager::install("celldex")
+library(celldex)
+if (!requireNamespace("devtools", quietly = TRUE)) install.packages("devtools")
+if (!requireNamespace("DoubletFinder", quietly = TRUE))  remotes::install_github('chris-mcginnis-ucsf/DoubletFinder')
+library(DoubletFinder)
+if (!requireNamespace("cowplot", quietly = TRUE)) install.packages("cowplot")
+library(cowplot)
+if (!requireNamespace("corrplot", quietly = TRUE)) install.packages("corrplot")
+library(corrplot)
+if (!requireNamespace("ggtree", quietly = TRUE)) BiocManager::install("ggtree")
+library(ggtree)
+if (!requireNamespace("SingleR", quietly = TRUE)) BiocManager::install("SingleR")
+library(SingleR)
+if (!requireNamespace("Seurat", quietly = TRUE)) install.packages("Seurat")
+library(Seurat)
+if (!requireNamespace("clusterProfiler", quietly = TRUE)) BiocManager::install("clusterProfiler")
+library(clusterProfiler)
+if (!requireNamespace("plyr", quietly = TRUE)) install.packages("plyr")
+library(plyr)
+if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
+library(dplyr)
+library(scuttle)
+library("BiocParallel")
+library(future)
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) BiocManager::install("org.Hs.eg.db")
+library(org.Hs.eg.db)
+if (!requireNamespace("escape", quietly = TRUE)) BiocManager::install("escape")
+library(escape)
+library(rstatix)
+library(ggpubr)
+if (!requireNamespace("clustree", quietly = TRUE)) install.packages('clustree')
+library(clustree)
+library(stringr)
+if (!requireNamespace("scDblFinder", quietly = TRUE)) BiocManager::install("scDblFinder")
+library(scDblFinder)
+if (!requireNamespace("slingshot", quietly = TRUE)) BiocManager::install("kstreet13/slingshot")
+library(slingshot)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+###################################################################################
+WORKDIR <- '~/levenberg/'
+PLOTSDIR <- '~/levenberg/plots/'
+use.name <- 'Full'
+
+set.seed(555)
+
+CPU <- 8
+###################################################################################
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+my_colors <- c("#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#32CD32FF",  "#F08080FF",
+               "#9ACD32FF", "#4682B4FF",
+               "#40E0D0FF",  "#F0E68CFF", "#D2B48CFF", "#8FBC8BFF", 
+               "#DDA0DDFF", "#5F9EA0FF", "#FFDAB9FF", "#FFA07AFF", "#87CEEBFF")
+
+plot_theme = theme_classic(base_size=12, base_family = 'Helvetica') + 
+             theme(plot.title = element_text(size = 12, face = 'bold')
+                   )
+
+label_change <- function(input_string) {
+  modified_string <- gsub("_", " ", input_string)
+  return(modified_string)
+}
+```
+
+```{r define clusters, message=FALSE, warning=FALSE, include=FALSE}
+sc <- readRDS(paste0(WORKDIR, use.name, '.sc.rds'))
+
+dittoBarPlot(sc, "source", group.by = "seurat_clusters") +
+  ggtitle('')
+
+dittoBarPlot(sc, "source", group.by = "seurat_clusters", scale='count') +
+  ggtitle('')
+
+new.cluster.ids <- c('0'='Pericytes',
+                     '1'='Fibroblasts',
+                     '2'='Fibroblasts',
+                     '3'='Fibroblasts',
+                     '4'='Pericytes',
+                     '5'='Fibroblasts', #maybe myo
+                     '6'='Pericytes', 
+                     '7'='Placenta',
+                     '8'='Fibroblasts',
+                     '9'='Fibroblasts',
+                     '10'='Placenta',
+                     '11'='Pericytes',
+                     '12'='Fibroblasts',
+                     '13'='Pericytes', 
+                     '14'='Pericytes', 
+                     '15'='Pericytes',
+                     '16'='Fibroblasts', 
+                     '17'='Pericytes',
+                     '18'='Fibroblasts',
+                     '19'='Fibroblasts', 
+                     '20'='Fibroblasts',
+                     '21'='Fibroblasts',
+                     '22'='Fibroblasts',
+                     '23'='HUVEC')
+
+new.cluster.ids2 <- new.cluster.ids
+new.cluster.ids <- make.unique(new.cluster.ids)
+names(new.cluster.ids) <- levels(sc)
+sc <- RenameIdents(sc, new.cluster.ids)
+sc$idents <- sc@active.ident
+
+names(new.cluster.ids2) <- levels(sc)
+sc <- RenameIdents(sc, new.cluster.ids2)
+sc$idents2 <- sc@active.ident
+
+sc@active.ident <- sc$idents2
+```
+
+```{r read data, include=FALSE}
+huvec <- readRDS(paste0(WORKDIR, use.name, 'fibr.huvec.rds'))
+pericytes <- readRDS(paste0(WORKDIR, use.name, 'fibr.pericytes.rds'))
+fibroblasts <- readRDS(paste0(WORKDIR, use.name, 'fibr.fibroblasts.rds'))
+```
+
+In our study, single-cell RNA sequencing (scRNA-seq) was utilized to investigate four distinct cell culture models: 1) muscle cells co-cultured with endothelial cells, 2) a composite of muscle cells, endothelial cells, and PLX cells, 3) a triculture system comprising muscle cells, pericytes, and endothelial cells, and 4) a multiculture model that integrates the triculture with additional PLX cells. A detailed annotation process, specifically designed to determine the cellular composition of each sample, revealed that all muscle cells identified in the scRNA-seq were actually fibroblasts (Figure Xa and Supplementary Figure X).   
+Further independent analyses of the three cell types (endothelial cells, pericytes, and fibroblasts) demonstrated that introducing PLX cells significantly impacted their proliferative behaviors (Figure Xb). This impact varied: fibroblasts showed a positive response, pericytes exhibited a negative effect, and endothelial cells displayed a mixed response. Particularly, the addition of PLX cells to the muscle cell and endothelial cells co-culture resulted in an increased enrichment score in the cell cycle pathway. However, a contrasting effect was observed when comparing triculture and multiculture: the introduction of PLX cells to the triculture seemed to reduce the enrichment score along the cell cycle pathway. Notably, this was accompanied by an enhanced positive regulation of endothelial cell proliferation involved in sprouting angiogenesis in the multiculture with PLX cells, suggesting a more efficient angiogenesis process in this context (Figure Xc). These findings imply that PLX cells play a critical role in modulating cellular proliferation, particularly enhancing it overall. Regarding pericytes, the presence of PLX cells was found to adversely affect their proliferation, as evidenced by a reduced enrichment score in the cell cycle pathway in the multiculture model. This indicates a unique, cell-type-specific response to PLX cell addition. In the case of fibroblasts, PLX cells exerted a distinctly positive effect, observable both when added to the muscle cells and endothelial cells co-culture, and when integrated into the triculture with pericytes.    
+Additionally, we identified that anti-inflammatory properties of PLX cells. The introduction of these cells resulted in a diminished inflammatory response across all cell types (Figure Xd). Intriguingly, in endothelial cells, this anti-inflammatory effect was significant only when PLX cells were added to the triculture. It is noteworthy that while pericytes typically amplify the inflammatory response, the presence of PLX cells mitigated this effect, underscoring their potential as an anti-inflammatory agent.   
+Overall, our findings suggest that PLX cells are instrumental in modulating various cellular functions, including proliferation and inflammation, across different cell types and culture models. Their distinct effects on each cell type highlight the complexity and specificity of cellular interactions in these engineered environments.
+
+```{r plot proliferation, fig.height=8, fig.width=11, include=FALSE}
+huvec$source <- factor(huvec$source, levels = c('My.Hu', 'Pl.My.Hu', 'My.Pr.Hu', 'Pl.My.Pr.Hu'))
+fibroblasts$source <- factor(fibroblasts$source, levels = c('My.Hu', 'Pl.My.Hu', 'My.Pr.Hu', 'Pl.My.Pr.Hu'))
+pericytes$source <- factor(pericytes$source, levels = c('My.Pr.Hu', 'Pl.My.Pr.Hu'))
+sc$source <- factor(sc$source, levels = c('My.Hu', 'Pl.My.Hu', 'My.Pr.Hu', 'Pl.My.Pr.Hu'))
+
+p1_umap <- dittoDimPlot(sc, reduction.use = "umap", "source", size = 0.5, color.panel = my_colors) +
+  ggtitle('By samples') +
+  scale_colour_manual(values = my_colors, 
+                    labels=c('Muscle cells + HUVEC', 'Muscle cells + HUVEC +\nPlacenta cells',
+                              'Triculture', 'Multiculture')) 
+
+p2_umap <- dittoDimPlot(sc, reduction.use = "umap", "idents2", size = 0.5, color.panel = my_colors) +
+  ggtitle('By cell types') +
+  scale_fill_manual(values = my_colors)
+
+my_comparisons <- list(c('My.Hu', 'Pl.My.Hu'), c('My.Hu', 'My.Pr.Hu'), c('Pl.My.Pr.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'My.Pr.Hu'))
+
+p1_huvec <- dittoPlot(huvec, c(
+                   'REACTOME_CELL_CYCLE'
+                   ),
+          group.by = "source", boxplot.width = 0.4,
+          plots = c("boxplot"),
+          boxplot.show.outliers = FALSE,
+          boxplot.lineweight = 0.5) + 
+  geom_signif(comparisons = my_comparisons, step_increase = 0.08, y_position = 0.8,
+              map_signif_level = TRUE, tip_length = 0, textsize = 2.5) +
+  scale_y_continuous(breaks = seq(0, 1, 0.25), limits = c(0, 1.1)) +
+  scale_fill_manual(values = my_colors, 
+                    labels=c('Muscle cells + HUVEC', 'Muscle cells + HUVEC +\nPlacenta cells',
+                              'Triculture', 'Multiculture')) +
+  plot_theme +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  ylab('Enrichment score') +
+   labs(subtitle='HUVEC') +
+  ggtitle("") +
+  NoLegend()
+
+p2_huvec <- dittoPlot(huvec, c(
+                   'GOBP_POSITIVE_REGULATION_OF_BLOOD_VESSEL_ENDOTHELIAL_CELL_PROLIFERATION_INVOLVED_IN_SPROUTING_ANGIOGENESIS'
+                   ),
+          group.by = "source",
+          plots = c("boxplot"),
+          boxplot.show.outliers = FALSE, boxplot.width = 0.4,
+          boxplot.lineweight = 0.5) + 
+  geom_signif(comparisons = my_comparisons, y_position = 0.8,
+              map_signif_level = TRUE,
+              step_increase = 0.08, tip_length = 0, textsize = 2.5) +
+  scale_y_continuous(breaks = seq(0, 1, 0.25), limits = c(0, 1.1)) +
+  scale_fill_manual(values = my_colors, 
+                    labels=c('Muscle cells + HUVEC', 'Muscle cells + HUVEC +\nPlacenta cells',
+                              'Triculture', 'Multiculture')) +
+  plot_theme +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        plot.title=element_text(size=12, face = 'bold', hjust = -0.1)) +
+  ylab('Enrichment score') +
+  labs(subtitle='HUVEC') +
+  ggtitle("Cell proliferation involved\nin sprouting angiogenesis") +
+  NoLegend()
+
+p1_fibroblasts <- dittoPlot(fibroblasts, c(
+                   'REACTOME_CELL_CYCLE'
+                   ),
+          group.by = "source",
+          plots = c("boxplot"),
+          boxplot.show.outliers = FALSE, boxplot.width = 0.4,
+          boxplot.lineweight = 0.5) + 
+  geom_signif(comparisons = my_comparisons, y_position = 0.65,
+              map_signif_level = TRUE,
+              step_increase = 0.08, tip_length = 0, textsize = 2.5) +
+  scale_y_continuous(breaks = seq(0, 1, 0.25), limits = c(0, 1.1)) +
+  scale_fill_manual(values = my_colors, 
+                    labels=c('Muscle cells + HUVEC', 'Muscle cells + HUVEC\n+ Placenta cells',
+                              'Triculture', 'Multiculture')) +
+  plot_theme +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank()) +
+  ylab('Enrichment score') +
+  labs(subtitle='Fibroblasts') +
+  ggtitle("") +
+  NoLegend()
+
+my_comparisons <- list(c('Pl.My.Pr.Hu', 'My.Pr.Hu'))
+
+p1_pericytes <- 
+  dittoPlot(pericytes, c(
+                   'REACTOME_CELL_CYCLE'
+                   ),
+          group.by = "source",
+          plots = c("boxplot"),
+          boxplot.show.outliers = FALSE, boxplot.width = 0.4,
+          boxplot.lineweight = 0.5) + 
+  geom_signif(comparisons = my_comparisons, y_position = 0.75,
+              map_signif_level = TRUE,
+              step_increase = 0.08, tip_length = 0, textsize = 2.5) +
+  scale_y_continuous(breaks = seq(0, 1, 0.25), limits = c(0, 1.1)) +
+  scale_fill_manual(values = c("#BA55D3FF",  "#32CD32FF"), 
+                    labels=c('Triculture', 'Multiculture')) +
+  plot_theme +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank()) +
+  ylab('Enrichment score') +
+   labs(subtitle='Pericytes') +
+  ggtitle("") +
+  NoLegend()
+```
+
+```{r plot inflammatory, fig.height=5, fig.width=14, include=FALSE}
+my_comparisons <- list(c('My.Hu', 'My.Pr.Hu'), c('My.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'My.Pr.Hu'))
+
+p_huvec <- dittoPlot(huvec, c(
+                   'WP_INFLAMMATORY_RESPONSE_PATHWAY'
+                   ),
+          group.by = "source",
+          plots = c("boxplot"),
+          boxplot.show.outliers = FALSE, boxplot.width = 0.4,
+          boxplot.lineweight = 0.5) + 
+  scale_fill_manual(values = my_colors, 
+                    labels=c('Muscle cells + HUVEC', 'Muscle cells + HUVEC +\nPlacenta cells',
+                              'Triculture', 'Multiculture')) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = TRUE,  y_position = 0.9,
+              step_increase = 0.08, tip_length = 0, textsize = 2.5) +
+  scale_y_continuous(breaks = seq(0, 1, 0.25), limits = c(0, 1.2)) +
+  plot_theme +
+  ggtitle("") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  ylab('Enrichment score') +
+   labs(subtitle='HUVEC') +
+  NoLegend()
+
+p2_fibroblasts <- dittoPlot(fibroblasts, c(
+                   'WP_INFLAMMATORY_RESPONSE_PATHWAY'
+                   ),
+          group.by = "source",
+          plots = c("boxplot"),
+          boxplot.show.outliers = FALSE, boxplot.width = 0.4,
+          boxplot.lineweight = 0.5) + 
+  scale_fill_manual(values = my_colors, 
+                    labels=c('Muscle cells + HUVEC', 'Muscle cells + HUVEC +\nPlacenta cells',
+                              'Triculture', 'Multiculture')) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = TRUE,  y_position = 0.9,
+              step_increase = 0.08, tip_length = 0, textsize = 2.5) +
+  scale_y_continuous(breaks = seq(0, 1, 0.25), limits = c(0, 1.2)) +
+  plot_theme +
+  ggtitle("") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank()) +
+  ylab('Enrichment score') +
+  labs(subtitle='Fibroblasts') 
+
+my_comparisons <- list(c('Pl.My.Pr.Hu', 'My.Pr.Hu'))
+
+p2_pericytes <- 
+  dittoPlot(pericytes, c(
+                   'WP_INFLAMMATORY_RESPONSE_PATHWAY'
+                   ),
+          group.by = "source",
+          plots = c("boxplot"),
+          boxplot.show.outliers = FALSE, boxplot.width = 0.4,
+          boxplot.lineweight = 0.5) + 
+  scale_fill_manual(values = c("#BA55D3FF",  "#32CD32FF"), 
+                    labels=c('Triculture', 'Multiculture')) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = TRUE, y_position = 0.9,
+              step_increase = 0.08, tip_length = 0, textsize = 2.5) +
+  scale_y_continuous(breaks = seq(0, 1, 0.25), limits = c(0, 1.2)) +
+  plot_theme +
+  ggtitle("") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank()) +
+  ylab('Enrichment score') +
+  labs(subtitle='Pericytes') +
+  NoLegend()
+```
+
+```{r echo=FALSE, fig.height=10, fig.width=10}
+p1 <- plot_grid( p1_umap, p2_umap, rel_widths = c(1.2, 1), nrow=1)
+p2 <- plot_grid(
+                plot_grid(p1_huvec, p1_pericytes, p1_fibroblasts, nrow=1, rel_widths = c(1, 1, 1), align = "v"), 
+                labels = c('Cell cycle',
+                           'C'), p2_huvec, label_x = c(0.35, 0),
+                nrow=1, rel_widths = c(3, 1.15))
+p3_infl <- plot_grid(plot_grid(plot_grid(p_huvec, '', p2_pericytes, '', p2_fibroblasts, nrow=1, 
+                                    rel_widths = c(0.8, 0.12, 0.6, 0.14, 1.3), align = "v"),
+                           '', nrow=1, rel_widths = c(4, 0.2)), #c(1.2, 2, 1.5, 1.7, 1.2)),
+                labels = 'Inflammatory response pathway (WikiPathways)', label_x = -0.13) 
+
+
+plot_grid(p1, p2, p3_infl, nrow=3, labels = c('A', 'B', 'D'))
+```
+
+
+```{r eval=FALSE, include=FALSE}
+data_huvec <- huvec@meta.data %>% 
+  select(source, GOBP_POSITIVE_REGULATION_OF_BLOOD_VESSEL_ENDOTHELIAL_CELL_PROLIFERATION_INVOLVED_IN_SPROUTING_ANGIOGENESIS,
+         REACTOME_CELL_CYCLE, WP_INFLAMMATORY_RESPONSE_PATHWAY) %>% 
+  pivot_longer(cols = c('GOBP_POSITIVE_REGULATION_OF_BLOOD_VESSEL_ENDOTHELIAL_CELL_PROLIFERATION_INVOLVED_IN_SPROUTING_ANGIOGENESIS',
+                        'REACTOME_CELL_CYCLE',
+                        'WP_INFLAMMATORY_RESPONSE_PATHWAY'))
+
+data_huvec$cell_type <- 'HUVEC'
+
+data_pericytes <- pericytes@meta.data %>% 
+  select(source, 
+         REACTOME_CELL_CYCLE, WP_INFLAMMATORY_RESPONSE_PATHWAY) %>% 
+  pivot_longer(cols = c(
+                        'REACTOME_CELL_CYCLE',
+                        'WP_INFLAMMATORY_RESPONSE_PATHWAY'))
+
+data_pericytes$cell_type <- 'Pericytes'
+
+data_fibroblasts <- fibroblasts@meta.data %>% 
+  select(source, 
+         REACTOME_CELL_CYCLE, WP_INFLAMMATORY_RESPONSE_PATHWAY) %>% 
+  pivot_longer(cols = c(
+                        'REACTOME_CELL_CYCLE',
+                        'WP_INFLAMMATORY_RESPONSE_PATHWAY'))
+
+data_fibroblasts$cell_type <- 'Fibroblasts'
+
+data <- rbind(data_fibroblasts, data_huvec) %>% 
+  rbind(data_pericytes)
+
+colnames(data) <- c("Sample", "Pathway", "Enrichment_score", "Cell_type")
+```
+
+```{r eval=FALSE, fig.width=10, include=FALSE}
+filt_data <- data %>% 
+  filter(Pathway != 'GOBP_POSITIVE_REGULATION_OF_BLOOD_VESSEL_ENDOTHELIAL_CELL_PROLIFERATION_INVOLVED_IN_SPROUTING_ANGIOGENESIS')
+my_comparisons <- list(c('Pl.My.Pr.Hu', 'My.Pr.Hu'), c('My.Hu', 'My.Pr.Hu'), c('My.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'Pl.My.Hu'))
+
+ggplot(filt_data, aes(x=Sample, y=Enrichment_score, fill=Sample)) + 
+  geom_boxplot(outlier.shape = NA) +
+  scale_fill_manual(values = my_colors, 
+                    labels=c('Muscle cells + HUVEC', 'Muscle cells + HUVEC +\nPlacenta cells',
+                              'Triculture', 'Multiculture')) +
+  scale_y_continuous(breaks = seq(0, 1, 0.25), limits = c(0, 1.2)) +
+  facet_grid(Pathway~Cell_type) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = TRUE,  y_position = 0.9,
+              step_increase = 0.08, tip_length = 0, textsize = 2.5) +
+   plot_theme +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) 
+```
+
+# Supplementary figures
+
+```{r plots for preprocessing part 1, echo=FALSE, fig.height=14, fig.width=12, message=FALSE, warning=FALSE}
+sc$source <- replace(sc$source, sc$source=='Pl.My.Pr.Hu', 'Multiculture')
+sc$source <- replace(sc$source, sc$source=='My.Pr.Hu', 'Triculture')
+sc$source <- replace(sc$source, sc$source=='Pl.My.Hu', 'Muscle cells + HUVEC +\nPlacenta cells')
+sc$source <- replace(sc$source, sc$source=='My.Hu', 'Muscle cells + HUVEC')
+
+p1 <- dittoDimPlot(sc, reduction.use = "umap", "source",size = 0.5,split.by = 'source') +
+  ggtitle('By sample')
+
+p2 <- dittoDimPlot(sc, reduction.use = "umap", "idents", size = 0.5, split.by = 'source') +
+  ggtitle('By cell types + clusters')
+
+p2.3 <- dittoDimPlot(sc, reduction.use = "umap", "idents2", size = 0.5) +
+  ggtitle('By clusters')
+
+p2.4 <- dittoDimPlot(sc, reduction.use = "umap", "idents2", size = 0.5, split.by = 'source') +
+  ggtitle('By sample')
+
+p3 <- dittoBarPlot(sc, "source", group.by = "idents") +
+  ggtitle('')
+
+markers.cluster <- FindAllMarkers(sc, only.pos = TRUE, min.pct = 0.25,
+                                  min.diff.pct = 0.1, logfc.threshold = 0.25)
+top4 <- markers.cluster %>% 
+  group_by(cluster) %>% 
+  top_n(n = 7, wt = avg_log2FC)
+
+sc$MYOD1 <- 0
+sc$MYH2 <- 0
+sc$MYL2 <- 0
+
+p4 <- dittoDotPlot(sc, vars = c(unique(top4$gene), 'MYOD1', 'DES', 'MYH2', 'MYL2'), group.by = "idents2", 
+                   max.color='blue', min.color='white') +
+  ylab('Clusters')
+
+plot_grid(plot_grid(p1, p2, labels = c('A', 'B')), 
+          plot_grid(p3, labels = c('C')), 
+          plot_grid(p4, labels = c('D')), nrow=3)
+
+# ggsave(paste0(PLOTSDIR, use.name, '.figure1.png'), width=14, height=14)
+```
+
+
+
+```{r echo=FALSE}
+my_comparisons <- list(c('My.Hu', 'My.Pr.Hu'), c('My.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'My.Pr.Hu'))
+
+dittoPlot(huvec, c(
+                   'HMOX1'
+                   ),
+          group.by = "source",
+          plots = c("boxplot"),
+          boxplot.show.outliers = FALSE, boxplot.width = 0.4,
+          boxplot.lineweight = 0.5) + 
+  geom_signif(comparisons = my_comparisons, y_position = 0.8,
+              map_signif_level = TRUE,
+              step_increase = 0.08, tip_length = 0, textsize = 2.5) +
+  scale_fill_manual(values = my_colors, 
+                    labels=c('Muscle cells + HUVEC', 'Muscle cells + HUVEC +\nPlacenta cells',
+                              'Triculture', 'Multiculture')) +
+  plot_theme +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        plot.title=element_text(size=12, face = 'bold', hjust = -0.1)) +
+  ylab('Enrichment score') +
+  labs(subtitle='HUVEC') +
+  ggtitle("WP_ANGIOGENESIS") +
+  NoLegend()
+```
+
+```{r}
+colors <- colorRampPalette(c("#0D0887FF","#7E03A8FF","#CC4678FF","#F89441FF","#F0F921FF"))
+vegf_genes <- wp['WP_VEGFAVEGFR2_SIGNALING']@.Data[[1]]@geneIds[wp['WP_VEGFAVEGFR2_SIGNALING']@.Data[[1]]@geneIds %in% rownames(huvec)]
+
+
+DefaultAssay(object = huvec) <- "RNA"
+huvec <- ScaleData(huvec)
+
+vegf_genes2 <- wp_enr@result %>% 
+  filter(ID == 'WP3888') %>% 
+  dplyr::mutate(symbol = str_split(geneID, '/'))
+                
+vegf_genes2 <- mapIds(org.Hs.eg.db, 
+                            keys = unlist(vegf_genes2$symbol), 
+                            column = "SYMBOL", 
+                            keytype = "ENTREZID")
+  
+DoHeatmap(huvec, features = vegf_genes2, group.by = 'source', group.colors = my_colors, label=F) +
+  scale_fill_gradientn(colors = c("#6495EDFF", "white", "#FF69B4FF")) +
+  theme(axis.text = element_text(size = 10)) 
+
+dittoHeatmap(huvec, genes = vegf_genes,
+             annot.by = "source", 
+             fontsize = 7,
+             heatmap.colors = colors(50),
+             annot.colors = my_colors) 
+```
+
+
+```{r}
+my_comparisons <- list(c('My.Hu', 'My.Pr.Hu'), c('My.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'My.Pr.Hu'))
+
+dittoPlot(huvec, c(
+                   'REACTOME_SIGNALING_BY_VEGF'
+                   ),
+          group.by = "source",
+          plots = c("boxplot"),
+          boxplot.show.outliers = FALSE, boxplot.width = 0.4,
+          boxplot.lineweight = 0.5) + 
+  geom_signif(comparisons = my_comparisons, y_position = 0.8,
+              map_signif_level = TRUE,
+              step_increase = 0.08, tip_length = 0, textsize = 2.5) +
+  scale_y_continuous(breaks = seq(0, 1, 0.25), limits = c(0, 1.1)) +
+  scale_fill_manual(values = my_colors, 
+                    labels=c('Muscle cells + HUVEC', 'Muscle cells + HUVEC +\nPlacenta cells',
+                              'Triculture', 'Multiculture')) +
+  plot_theme +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        plot.title=element_text(size=12, face = 'bold', hjust = -0.1)) +
+  ylab('Enrichment score') +
+  labs(subtitle='HUVEC') +
+  ggtitle("Angiogenesis") +
+  NoLegend()
+```
+
+```{r}
+wp <- getGeneSets(library = "C2", subcategory = 'CP:WIKIPATHWAYS')
+custom_fibrotic_response <- wp['WP_INFLAMMATORY_RESPONSE_PATHWAY']
+custom_fibrotic_response@.Data[[1]]@geneIds <- c("COL1A1", "COL1A2", "COL3A1", "FN1", "LAMA5", "LAMB1", 
+                                                 "LAMB2", "LAMC1", "LAMC2", "THBS1", "THBS3", "TNFRSF1A",
+                                                 "TNFRSF1B", "VTN")
+custom_fibrotic_response@.Data[[1]]@setName <- 'Fibrotic_response'
+
+ES <- enrichIt(obj = huvec[["RNA"]]$counts,
+               gene.sets = custom_fibrotic_response,
+               groups = 1500, 
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES$cluster <- huvec$source
+
+huvec <- AddMetaData(huvec, ES)
+
+ES <- enrichIt(obj = pericytes[["RNA"]]$counts,
+               gene.sets = custom_fibrotic_response,
+               groups = 10000, cores = 10,
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES$cluster <- pericytes$source
+
+pericytes <- AddMetaData(pericytes, ES)
+
+ES <- enrichIt(obj = fibroblasts[["RNA"]]$counts,
+               gene.sets = custom_fibrotic_response,
+               groups = 10000, cores = 10, 
+               min.size = 5, #method = 'UCell',
+               ssGSEA.norm = T)
+ES$cluster <- fibroblasts$source
+
+fibroblasts <- AddMetaData(fibroblasts, ES)
+
+huvec <- ScaleData(huvec)
+p1 <- DoHeatmap(huvec, features = custom_fibrotic_response@.Data[[1]]@geneIds, group.by = 'source', group.colors = my_colors, label=F) +
+  scale_fill_gradientn(colors = c("#6495EDFF", "white", "#FF69B4FF")) +
+  theme(axis.text = element_text(size = 10)) 
+
+pericytes <- ScaleData(pericytes)
+p2 <- DoHeatmap(pericytes, features = custom_fibrotic_response@.Data[[1]]@geneIds, group.by = 'source', group.colors = my_colors, label=F) +
+  scale_fill_gradientn(colors = c("#6495EDFF", "white", "#FF69B4FF")) +
+  theme(axis.text = element_text(size = 10)) 
+
+fibroblasts <- ScaleData(fibroblasts)
+p3 <- DoHeatmap(fibroblasts, features = custom_fibrotic_response@.Data[[1]]@geneIds, group.by = 'source', group.colors = my_colors, label=F) +
+  scale_fill_gradientn(colors = c("#6495EDFF", "white", "#FF69B4FF")) +
+  theme(axis.text = element_text(size = 10)) 
+# DotPlot(huvec, wp['WP_ANGIOGENESIS']@.Data[[1]]@geneIds) +
+#   ylab('Source') +
+#   ggtitle('Pericytes') +
+#   theme(axis.text.x = element_text(angle = 45,  hjust=1))
+```
+
+```{r plot inflammatory, fig.height=5, fig.width=14, include=FALSE}
+my_comparisons <- list(c('My.Hu', 'My.Pr.Hu'), c('My.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'Pl.My.Hu'), c('Pl.My.Pr.Hu', 'My.Pr.Hu'))
+
+p_infl_huvec <- dittoPlot(huvec, c(
+                   'Fibrotic_response'
+                   ),
+          group.by = "source",
+          plots = c("boxplot"),
+          boxplot.show.outliers = FALSE, boxplot.width = 0.4,
+          boxplot.lineweight = 0.5) + 
+  scale_fill_manual(values = my_colors, 
+                    labels=c('Muscle cells + HUVEC', 'Muscle cells + HUVEC +\nPlacenta cells',
+                              'Triculture', 'Multiculture')) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = TRUE,  y_position = 0.9,
+              step_increase = 0.08, tip_length = 0, textsize = 2.5) +
+  scale_y_continuous(breaks = seq(0, 1, 0.25), limits = c(0, 1.2)) +
+  plot_theme +
+  ggtitle("") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  ylab('Enrichment score') +
+   labs(subtitle='HUVEC') +
+  NoLegend()
+
+p2_infl_fibroblasts <- dittoPlot(fibroblasts, c(
+                   'Fibrotic_response'
+                   ),
+          group.by = "source",
+          plots = c("boxplot"),
+          boxplot.show.outliers = FALSE, boxplot.width = 0.4,
+          boxplot.lineweight = 0.5) + 
+  scale_fill_manual(values = my_colors, 
+                    labels=c('Muscle cells + HUVEC', 'Muscle cells + HUVEC +\nPlacenta cells',
+                              'Triculture', 'Multiculture')) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = TRUE,  y_position = 0.9,
+              step_increase = 0.08, tip_length = 0, textsize = 2.5) +
+  scale_y_continuous(breaks = seq(0, 1, 0.25), limits = c(0, 1.2)) +
+  plot_theme +
+  ggtitle("") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank()) +
+  ylab('Enrichment score') +
+  labs(subtitle='Fibroblasts') 
+
+my_comparisons <- list(c('Pl.My.Pr.Hu', 'My.Pr.Hu'))
+
+p2_infl_pericytes <- 
+  dittoPlot(pericytes, c(
+                   'Fibrotic_response'
+                   ),
+          group.by = "source",
+          plots = c("boxplot"),
+          boxplot.show.outliers = FALSE, boxplot.width = 0.4,
+          boxplot.lineweight = 0.5) + 
+  scale_fill_manual(values = c("#BA55D3FF",  "#32CD32FF"), 
+                    labels=c('Triculture', 'Multiculture')) +
+  geom_signif(comparisons = my_comparisons,
+              map_signif_level = TRUE, y_position = 0.9,
+              step_increase = 0.08, tip_length = 0, textsize = 2.5) +
+  scale_y_continuous(breaks = seq(0, 1, 0.25), limits = c(0, 1.2)) +
+  plot_theme +
+  ggtitle("") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank()) +
+  ylab('Enrichment score') +
+  labs(subtitle='Pericytes') +
+  NoLegend()
+
+p1_fibr <- plot_grid(plot_grid(plot_grid(p_infl_huvec, '', p2_infl_pericytes, '', p2_infl_fibroblasts, nrow=1, 
+                                    rel_widths = c(0.8, 0.12, 0.6, 0.14, 1.3), align = "v"),
+                           '', nrow=1, rel_widths = c(4, 0.2)), #c(1.2, 2, 1.5, 1.7, 1.2)),
+                labels = 'Fibrotic response') 
+p2_fibr <- plot_grid(p1, p2, p3, nrow = 1, labels = c('HUVEC', 'Pericytes', 'Fibroblasts'))
+```
+
+```{r fig.height=7, fig.width=12}
+plot_grid(p1_fibr, p2_fibr, nrow=2)
+```
+
+```{r}
+
+```
+

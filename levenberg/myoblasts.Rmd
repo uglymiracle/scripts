@@ -1,0 +1,880 @@
+---
+title: "myoblasts_analysis"
+output: html_document
+date: "2023-12-11"
+---
+
+```{r setup, include=FALSE, message = FALSE, warning = FALSE, include = FALSE }
+knitr::opts_chunk$set()
+if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+if (!requireNamespace("igraph", quietly = TRUE)) install.packages('igraph', repos='http://cran.rstudio.com/')
+if (!requireNamespace("dittoSeq", quietly = TRUE)) BiocManager::install("dittoSeq")
+library(dittoSeq)
+if (!requireNamespace("celldex", quietly = TRUE)) BiocManager::install("celldex")
+library(celldex)
+if (!requireNamespace("devtools", quietly = TRUE)) install.packages("devtools")
+if (!requireNamespace("Seurat", quietly = TRUE)) install.packages("Seurat")
+library(Seurat)
+if (!requireNamespace("clusterProfiler", quietly = TRUE)) BiocManager::install("clusterProfiler")
+library(clusterProfiler)
+if (!requireNamespace("plyr", quietly = TRUE)) install.packages("plyr")
+library(plyr)
+if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
+library(dplyr)
+library("BiocParallel")
+library(future)
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) BiocManager::install("org.Hs.eg.db")
+library(org.Hs.eg.db)
+if (!requireNamespace("clustree", quietly = TRUE)) install.packages('clustree')
+library(clustree)
+if (!requireNamespace("monocle3", quietly = TRUE)) 
+  BiocManager::install(c('BiocGenerics', 'DelayedArray', 'DelayedMatrixStats',
+                       'limma', 'lme4', 'S4Vectors', 'SingleCellExperiment',
+                       'SummarizedExperiment', 'batchelor', 'HDF5Array',
+                       'terra', 'ggrastr')) #it's for monocle3
+if (!requireNamespace("monocle3", quietly = TRUE)) 
+  devtools::install_github('cole-trapnell-lab/monocle3')
+library(monocle3)
+if (!requireNamespace("remotes", quietly = TRUE)) install.packages('remotes')
+if (!requireNamespace("R.utils", quietly = TRUE)) install.packages('R.utils')
+if (!requireNamespace("SeuratWrappers", quietly = TRUE)) 
+  remotes::install_github('satijalab/seurat-wrappers')
+library(SeuratWrappers)
+if (!requireNamespace("escape", quietly = TRUE)) BiocManager::install("escape")
+library(escape)
+if (!requireNamespace("destiny", quietly = TRUE)) BiocManager::install("destiny")
+library(destiny)
+if (!requireNamespace("presto", quietly = TRUE))
+  devtools::install_github('immunogenomics/presto')
+if (!requireNamespace("slingshot", quietly = TRUE)) BiocManager::install("kstreet13/slingshot")
+library(slingshot)
+if (!requireNamespace("mclust", quietly = TRUE)) install.packages("mclust")
+library(mclust)
+if(!require("pacman")) install.packages("pacman")
+pacman::p_load(ggthemes)
+library(ggbeeswarm)
+library(data.table)
+if (!requireNamespace("TSCAN", quietly = TRUE)) BiocManager::install("TSCAN")
+library(TSCAN)
+if (!requireNamespace("ggplotify", quietly = TRUE)) install.packages("ggplotify")
+library(ggplotify)
+library(grid)
+if (!requireNamespace("tradeSeq", quietly = TRUE)) BiocManager::install("tradeSeq")
+library(tradeSeq)
+library(forcats)
+if (!requireNamespace("scran", quietly = TRUE)) BiocManager::install("scran")
+library(scran)
+if (!requireNamespace("ggpubr", quietly = TRUE)) install.packages("ggpubr")
+library(ggpubr)
+library(rstatix)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+###################################################################################
+WORKDIR <- '~/levenberg/'
+PLOTSDIR <- '~/levenberg/plots/'
+use.name <- 'Myoblasts'
+
+set.seed(555)
+
+CPU <- 8
+###################################################################################
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+my_colors <- c("#6495EDFF", "#FF69B4FF", "#BA55D3FF",  "#32CD32FF",  "#F08080FF",
+               "#9ACD32FF", "#4682B4FF",
+               "#40E0D0FF",  "#F0E68CFF", "#D2B48CFF", "#8FBC8BFF", 
+               "#DDA0DDFF", "#5F9EA0FF", "#FFDAB9FF", "#FFA07AFF", "#87CEEBFF")
+
+plot_theme = theme_classic(base_size=12, base_family = 'Helvetica') + 
+             theme(plot.title = element_text(size = 14, face = 'bold')
+                   )
+```
+
+
+# Analysis of the effect of placental cells on the growth of myoblasts
+
+```{r read data, include=FALSE}
+# sc <- readRDS(paste0(WORKDIR, 'sc_allplacenta_postanalysis.rds'))
+# myoblasts <- subset(sc, idents2 == "Myoblasts")
+# saveRDS(myoblasts, paste0(WORKDIR, 'myoblasts.rds'))
+myoblasts <- readRDS(paste0(WORKDIR, 'myoblasts.rds'))
+myoblasts_pl <- subset(myoblasts, subset = source == 'Pl.My.Pr.Hu.1' | source == 'My.Pr.Hu.1')
+myoblasts_all <- myoblasts
+myoblasts <- myoblasts_pl
+```
+
+
+
+```{r preprocessing, message=FALSE, warning=FALSE, include=FALSE}
+myoblasts[["complexity"]] <- log10(myoblasts$nFeature_RNA) / log10(myoblasts$nCount_RNA)
+VlnPlot(myoblasts, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.ribo", "complexity"), ncol = 5)
+
+# myoblasts <- FindVariableFeatures(myoblasts, selection.method = "vst", nfeatures = 4000, assay = 'SCT')
+# var_feat <- VariableFeatures(myoblasts)
+# var_regex <-  '^HLA-|^IG[HJKL]|^RNA|^MT|^RP'
+# var_feat <- grep(var_regex, var_feat, invert=T, value=T)
+#myoblasts <- RunPCA(myoblasts, verbose = FALSE, features = var_feat)
+
+myoblasts$SCT_snn_res.1 <- NULL
+myoblasts <- RunPCA(myoblasts, verbose = FALSE)
+myoblasts <- RunUMAP(myoblasts, reduction = "pca", dims = 1:30, verbose = FALSE)
+myoblasts <- FindNeighbors(myoblasts, reduction = "pca", dims = 1:30)
+myoblasts <- FindClusters(myoblasts, resolution = seq(0.1, 0.6, by=0.1))
+clustree(myoblasts)
+
+Idents(myoblasts) <- "SCT_snn_res.0.6"
+myoblasts$seurat_clusters <- myoblasts$SCT_snn_res.0.6
+
+dittoDimPlot(myoblasts, reduction.use = "umap", var = "nFeature_RNA", size = 0.5) +
+  dittoDimPlot(myoblasts, reduction.use = "umap", var = "nCount_RNA", size = 0.5) +
+  dittoDimPlot(myoblasts, reduction.use = "umap", var = "percent.mt", size = 0.5)
+
+dittoDimPlot(myoblasts, reduction.use = "umap", "source", size = 0.5, split.by = 'source') +
+  ggtitle('By sample')
+
+dittoDimPlot(myoblasts, reduction.use = "umap", "source", size = 0.5, split.by = 'SCT_snn_res.0.6') +
+  ggtitle('Clusters by source')
+
+myoblasts_heatmap <- SCTransform(myoblasts, return.only.var.genes = FALSE) 
+```
+
+In the initial phase, myoblast clustering was performed from two experiments 
+(Pl.My.Pr.Hu.1, My.Pr.Hu.1), resulting in ten clusters. There are 3159 cells in total in the 
+analysis. 
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=TRUE}
+t <- table(myoblasts$source) %>% 
+  as.data.frame()
+
+colnames(t) <- c('source', 'number of cells')
+
+t
+```
+
+```{r echo=FALSE, fig.height=5, fig.width=12, message=FALSE, warning=FALSE}
+p1 <- dittoDimPlot(myoblasts, reduction.use = "umap", "SCT_snn_res.0.6", size = 1, 
+                   color.panel = my_colors) +
+  ggtitle('By clusters') +
+  plot_theme
+
+p2 <- dittoDimPlot(myoblasts, reduction.use = "umap", "source", size = 1, , color.panel = my_colors) +
+  ggtitle('By source') +
+  plot_theme
+
+cowplot::plot_grid(p1, p2, 
+          #labels = c('My.Pr.Hu.1', 'Pl.My.Pr.Hu.1'),
+          nrow=1)
+#ggsave(paste0(PLOTSDIR, 'umap.png'), width=12, height=5)
+```
+Notably, cells from both experiments are present in each cluster, with a prevalence of 
+placenta-grown cells in clusters 0, 1, 3, 9 and a dominance of cells grown without placenta in the 
+remaining clusters. There are twice as many pla- cells in our data, therefore, to assess the enrichment of clusters with cells from different experiments, it is worth paying attention to graph C. Quite a large part of pla+ cells fall on clusters 0 and 1, therefore, it can be said that in these clusters there is also enrichment with pla+ cells
+
+```{r echo=FALSE, fig.height=4, fig.width=10.5, message=FALSE, warning=FALSE}
+p1 <- dittoBarPlot(myoblasts, "source", group.by = "seurat_clusters", color.panel = my_colors) +
+  ggtitle('') +
+  plot_theme +
+  NoLegend()
+p2 <- dittoBarPlot(myoblasts, "source", group.by = "seurat_clusters", 
+                   scale='count', color.panel = my_colors) +
+  ggtitle('') +
+  plot_theme
+p3 <- dittoBarPlot(myoblasts, "seurat_clusters", group.by = "source", 
+                   color.panel = my_colors) +
+  ggtitle('') +
+  plot_theme
+
+cowplot::plot_grid(p1, p2, p3, 
+          nrow=1, rel_widths = c(1, 1.5, 1),
+          labels = c('A', "B", "C"))
+#ggsave(paste0(PLOTSDIR, 'barplot.png'), width=12, height=5)
+```
+
+Based on the hierarchical clustering graph, we see that clusters 4, 5 and 7 are the closest to each other. Else one group are represented by clusters 1, 9 and 8, as well as 0 and 2 form another group
+
+```{r clustree, echo=FALSE, fig.height=4, fig.width=5, message=FALSE, warning=FALSE}
+clustree(myoblasts, node_size_range = c (2, 8), edge_width = 0.8, 
+         node_text_size=2, node_label_size=2) +
+  theme(legend.text=element_text(size=6), 
+        legend.title=element_text(size=8),
+        legend.key.height = unit(0.35, 'cm')) +
+  guides(size=guide_legend(ncol=2), 
+         color=guide_legend(ncol=2)) 
+```
+
+## Differential expression (DE)
+
+Markers have been defined for each cluster.
+
+```{r markers, echo=FALSE, fig.height=4, fig.width=9, message=FALSE, warning=FALSE}
+markers.cluster <- FindAllMarkers(myoblasts, only.pos = TRUE, min.pct = 0.25,
+                                    min.diff.pct = 0.1, logfc.threshold = 0.25)
+
+top5 <- markers.cluster %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  group_by(cluster) %>% 
+  top_n(n = 5, wt = avg_log2FC)
+
+
+dittoDotPlot(myoblasts, vars = unique(top5$gene), group.by = "seurat_clusters", 
+             max.color='#6495EDFF', min.color='white') +
+  ylab('Clusters') +
+  plot_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+
+# VlnPlot(myoblasts, features = unique(top5$gene), group.by = "SCT_snn_res.0.2") 
+#ggsave(paste0(PLOTSDIR, 'DEG.png'), width=8, height=4)
+```
+
+```{r heatmap, echo=FALSE, fig.height=7, fig.width=8, message=FALSE, warning=FALSE}
+DoHeatmap(myoblasts_heatmap, features = unique(top5$gene), group.by = 'seurat_clusters') +
+  scale_fill_gradientn(colors = c("#6495EDFF", "white", "#FF69B4FF")) +
+  theme(axis.text = element_text(size = 10))
+```
+
+Among the markers found, there are several genes that play a role in angiogenesis. PDGFC, which plays an important role in angiogenesis <sup>[1](https://www.uniprot.org/uniprotkb/Q9NRA1/entry#function)</sup>. EDIL3 - It plays a role in mediating angiogenesis and may be important in vessel wall remodeling and development.<sup>[2](https://www.genecards.org/cgi-bin/carddisp.pl?gene=EDIL3)</sup> TAGLN is a canonical smooth muscle cell marker that stimulates angiogenesis.<sup>[3](https://journals.biologists.com/jcs/article/134/15/jcs254920/271140/The-canonical-smooth-muscle-cell-marker-TAGLN-is)</sup> ACTA 2 is expressed in these clusters, which is necessary in the early stages of angiogenesis.<sup>[4](https://www.frontiersin.org/articles/10.3389/fcell.2021.755409/full)</sup> These markers associated with angiogenesis are found in clusters 4, 5 and 7, which suggests that these are cells in which angiogenesis processes are actively underway.
+
+In cluster 3, all markers are associated with cell division. UBE2C - The encoded protein is required for the destruction of mitotic cyclins and for cell 
+cycle progression.<sup>[5](https://www.genecards.org/cgi-bin/carddisp.pl?gene=UBE2C)</sup> DLGAP5 - is required for mitotic spindle organization.<sup>[6](https://www.genecards.org/cgi-bin/carddisp.pl?gene=DLGAP5)</sup> CDC20 -  It is required for two microtubule-dependent processes, nuclear movement prior to anaphase and chromosome separation.<sup>[7](https://www.genecards.org/cgi-bin/carddisp.pl?gene=CDC20)</sup>. CDK1 - This protein is a catalytic subunit of the highly conserved protein kinase complex known as M-phase promoting factor (MPF), which is essential for G2/M phase transitions of eukaryotic cell cycle.<sup>[8](https://www.ncbi.nlm.nih.gov/gene/983)</sup> CCNA2 - The protein encoded by this gene belongs to the highly conserved cyclin family, whose members function as regulators of the cell cycle. This protein binds and activates cyclin-dependent kinase 2 and thus promotes transition through G1/S and G2/M. <sup>[9](https://www.ncbi.nlm.nih.gov/gene/890)</sup> 
+
+Amyloids (SAA1, SAA2)<sup>[10](https://www.ncbi.nlm.nih.gov/gene/6288)</sup> and gene which expression was found in muscles during inflammation (CHI3L2)<sup>[11](https://pubmed.ncbi.nlm.nih.gov/24512683/)</sup> were found among the markers of cluster 1. As mentioned earlier, clusters 9 and 8 are close to 1, and have similar marker expression. The expression of amyloids and inflammatory genes is observed in all 3 clusters. These cells are probably damaged or incorrectly differentiated.
+
+## GSEA
+
+According to the results of the enrichment analysis, it is observed that cluster 3 is represented by actively dividing cells. We are observing the enrichment of processes related to cell division and DNA replication.
+
+```{r GSEA, message=FALSE, warning=FALSE, include=FALSE}
+# gene.sets <- getGeneSets(library = "H")
+# 
+# ES <- enrichIt(obj = myoblasts[["SCT"]]$counts, 
+#                gene.sets = gene.sets, 
+#                groups = 1500, cores = CPU, 
+#                min.size = 5, #method = 'UCell',
+#                ssGSEA.norm = T)
+# ES$cluster <- myoblasts$seurat_clusters
+# 
+# write.table(ES, paste0(WORKDIR, 'GSEA.tsv'))
+ES <- fread(paste0(WORKDIR, 'GSEA.tsv'))
+myoblasts <- AddMetaData(myoblasts, ES)
+```
+
+
+```{r echo=FALSE, fig.height=6, fig.width=10, message=FALSE, warning=FALSE}
+dittoPlot(myoblasts, c( "HALLMARK_E2F_TARGETS", 
+                        "HALLMARK_DNA_REPAIR",
+                        "HALLMARK_G2M_CHECKPOINT",
+                        "HALLMARK_MITOTIC_SPINDLE"),
+          group.by = "seurat_clusters",
+          plots = c("vlnplot")) + 
+  scale_fill_manual(values = my_colors) +
+  plot_theme
+```
+Also, in cluster 4, there is an increased activity of genes regulated by interferon gamma, which is known for its influence on the processes of myogenesis. 
+
+```{r echo=FALSE, fig.height=3, fig.width=10, message=FALSE, warning=FALSE}
+dittoPlot(myoblasts, c( "HALLMARK_MYOGENESIS",
+                        "HALLMARK_INTERFERON_GAMMA_RESPONSE"),
+          group.by = "seurat_clusters",
+          plots = c("vlnplot")) + 
+  scale_fill_manual(values = my_colors) +
+  plot_theme
+
+```
+
+
+```{r gsea_go, message=FALSE, warning=FALSE, include=FALSE}
+ES_go <- fread(paste0(WORKDIR, 'GSEA_GO.tsv'))
+myoblasts <- AddMetaData(myoblasts, ES_go)
+
+```
+Cluster markers 0 and 2 are membrane proteins and proteins involved in cell adhesion. There is also enrichment in GSEA along adhesion-related pathways. There are studies confirming that adhesion is necessary and important for myogenesis.<sup>[12](https://www.sciencedirect.com/science/article/pii/S016748892100224X)</sup>
+
+```{r echo=FALSE, fig.height=3, fig.width=10, message=FALSE, warning=FALSE}
+dittoPlot(myoblasts, c("GOBP_CELL_CELL_ADHESION",
+                        "GOBP_CELL_MATRIX_ADHESION",
+                        'GOBP_CELL_SUBSTRATE_ADHESION'
+                      ),
+          group.by = "seurat_clusters",
+          plots = c("vlnplot")) + 
+  scale_fill_manual(values = my_colors) +
+  plot_theme
+
+```
+
+## Cell-cycle score
+
+We assigned each cell a score, based on its expression of G2/M and S phase markers. We see that the cells of cluster 3 are mostly represented by cells in the G2M phase. Such cells are also rarely observed in other clusters. In addition, cells in the S phase are found in many clusters. However, most of the cells are represented by non-dividing cells in the G1 phase.
+
+```{r cell-cycle score, echo=FALSE, fig.height=5, fig.width=14, message=FALSE, warning=FALSE}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+myoblasts <- CellCycleScoring(myoblasts, s.features = s.genes, g2m.features = g2m.genes)
+
+p1 <- dittoDimPlot(myoblasts, reduction.use = "umap", "Phase", size = 0.5, split.by = 'Phase', 
+             color.panel = my_colors) +
+  ggtitle('By phase') +
+  plot_theme +
+  NoLegend()
+
+p2 <- dittoBarPlot(myoblasts, "Phase", group.by = "cluster", color.panel = my_colors) +
+  ggtitle('') +
+  plot_theme
+
+cowplot::plot_grid(p1, p2, 
+          nrow=1, rel_widths = c(1, 0.7),
+          labels = c("A", "B"))
+```
+
+## Pseudotime analysis
+
+The next stage of the analysis was a pseudo-time analysis, according to which cells differentiate in 3 different directions. It is worth noting that all three trajectories have a common origin from the 3 cluster.
+
+```{r slingshot, echo=FALSE, fig.height=5, fig.width=15, message=FALSE, warning=FALSE}
+sce_new <- as.SingleCellExperiment(myoblasts)
+
+colData(sce_new)$seurat_clusters <- as.character(myoblasts$seurat_clusters)  # go from factor to character
+sce_new <- slingshot(sce_new, clusterLabels = 'seurat_clusters', reducedDim = 'UMAP', 
+                     start.clus = '3', dist.method = 'mnn', #end.clus = c('2', '4', '9'), 
+                     #reweight = FALSE
+                     )
+
+# Plot PC1 vs PC2 colored by Slingshot pseudotime.
+plot_data <- as.data.frame(reducedDims(sce_new)$UMAP) %>% 
+  cbind(pseudotime1 = sce_new$slingPseudotime_1,
+        pseudotime2 = sce_new$slingPseudotime_2,
+        pseudotime3 = sce_new$slingPseudotime_3)
+
+# Extract Slingshot trajectory information
+slingshot_data1 <- as.data.frame(SlingshotDataSet(sce_new)@curves$Lineage1$s) 
+slingshot_data2 <- as.data.frame(SlingshotDataSet(sce_new)@curves$Lineage2$s) 
+slingshot_data3 <- as.data.frame(SlingshotDataSet(sce_new)@curves$Lineage3$s) 
+
+p1 <- ggplot(data=plot_data, aes(x = umap_1, y = umap_2)) +
+  geom_point(aes(color = pseudotime1), shape = 16) +
+  scale_color_gradient(low = "#6495EDFF", high = "#FF69B4FF", limits=c(0,18)) +
+  coord_fixed() +
+  labs(title = "Pseudotime 1") +
+  geom_path(data = slingshot_data1, aes(x = umap_1, y = umap_2), size = 2) +
+  theme_classic() +
+  labs(colour="pseudotime")
+  
+
+p2 <- ggplot(data=plot_data, aes(x = umap_1, y = umap_2)) +
+  geom_point(aes(color = pseudotime2), shape = 16) +
+  scale_color_gradient(low = "#6495EDFF", high = "#FF69B4FF", limits=c(0,18)) +
+  coord_fixed() +
+  labs(title = "Pseudotime 2") +
+  geom_path(data = slingshot_data2, aes(x = umap_1, y = umap_2), size = 2) +
+  theme_classic() +
+  labs(colour="pseudotime")
+
+p3 <- ggplot(data=plot_data, aes(x = umap_1, y = umap_2)) +
+  geom_point(aes(color = pseudotime3), shape = 16) +
+  scale_color_gradient(low = "#6495EDFF", high = "#FF69B4FF", limits=c(0,18)) +
+  coord_fixed() +
+  labs(title = "Pseudotime 3") +
+  geom_path(data = slingshot_data3, aes(x = umap_1, y = umap_2), size = 2) +
+  theme_classic() +
+  labs(colour="pseudotime")
+
+# Plot Slingshot pseudotime vs cell stage.
+sce_new2 <- sce_new
+sce_new2$slingshot <- NULL
+  
+# p4 <- ggplot(as.data.table(colData(sce_new2)) %>% 
+#                dplyr::mutate(seurat_clusters = as.factor(seurat_clusters)) %>% 
+#                dplyr::mutate(seurat_clusters = fct_reorder(seurat_clusters, slingPseudotime_1)),
+#   aes(x = slingPseudotime_1, y = seurat_clusters, 
+#       colour = slingPseudotime_1)) +
+#     geom_quasirandom(groupOnX = FALSE) +
+#     scale_color_gradient(low = "#6495EDFF", high = "#FF69B4FF", limits=c(0,18)) +
+#     theme_classic() +
+#     xlab("Slingshot pseudotime") + 
+#     ylab("Cluster") +
+#     ggtitle("Pseudotime 1") +
+#     labs(colour="pseudotime")
+# p5 <- ggplot(as.data.table(colData(sce_new2)) %>% 
+#                dplyr::mutate(seurat_clusters = as.factor(seurat_clusters)) %>% 
+#                dplyr::mutate(seurat_clusters = fct_reorder(seurat_clusters, slingPseudotime_2)),
+#              aes(x = slingPseudotime_2, y = seurat_clusters, 
+#                  colour = slingPseudotime_2)) +
+#     geom_quasirandom(groupOnX = FALSE) +
+#     scale_color_gradient(low = "#6495EDFF", high = "#FF69B4FF", limits=c(0,18)) +
+#     theme_classic() +
+#     xlab("Slingshot pseudotime") + 
+#     ylab("Cluster") +
+#     ggtitle("Pseudotime 2") +
+#     labs(colour="pseudotime")
+# p6 <- ggplot(as.data.table(colData(sce_new2)) %>% 
+#                dplyr::mutate(seurat_clusters = as.factor(seurat_clusters)) %>% 
+#                dplyr::mutate(seurat_clusters = fct_reorder(seurat_clusters, slingPseudotime_3)),
+#              aes(x = slingPseudotime_3, y = seurat_clusters, 
+#                  colour = slingPseudotime_3)) +
+#     geom_quasirandom(groupOnX = FALSE) +
+#     scale_color_gradient(low = "#6495EDFF", high = "#FF69B4FF", limits=c(0,18)) +
+#     theme_classic() +
+#     xlab("Slingshot pseudotime") + 
+#     ylab("Cluster") +
+#     ggtitle("Pseudotime 3") +
+#     labs(colour="pseudotime")
+
+cowplot::plot_grid(p1, p2, p3, 
+          #labels = c('My.Pr.Hu.1', 'Pl.My.Pr.Hu.1'),
+          nrow=1)
+```
+
+```{r echo=FALSE, fig.height=4, fig.width=6, message=FALSE, warning=FALSE}
+avg_pseudotime <- as.data.table(colData(sce_new2)) %>%
+  rowwise() %>% 
+  dplyr::mutate(avg_time = mean(c_across(c('slingPseudotime_1', 
+                                              'slingPseudotime_2', 
+                                              'slingPseudotime_3')),
+                                   na.rm=TRUE)) %>% 
+  dplyr::mutate(seurat_clusters = as.factor(seurat_clusters)) %>% 
+  dplyr::mutate(seurat_clusters = fct_reorder(seurat_clusters, avg_time))
+
+avg_pseudotime$seurat_clusters <- ordered(avg_pseudotime$seurat_clusters, 
+                                          levels = c("3", "6","0", "7", "8", "2", "5", "4", "1", "9"))
+ggplot(avg_pseudotime,
+       aes(x = avg_time, y = seurat_clusters, colour = avg_time)) +
+    geom_quasirandom(groupOnX = FALSE) +
+    scale_color_gradient(low = "#6495EDFF", high = "#FF69B4FF", limits=c(0,18)) +
+    plot_theme +
+    xlab("Slingshot pseudotime") + 
+    ylab("Cluster") +
+    ggtitle("Pseudotime") +
+    labs(colour="pseudotime")
+```
+
+Cluster 3 was chosen as the root of differentiation, since enrichment of pathways associated with cell division is observed in it. Moreover, there is a concept according to which undifferentiated cells have more diverse expression profiles <sup>[13](https://pubmed.ncbi.nlm.nih.gov/31974247/)</sup>. We quantified expression diversity by calculating the entropy of each cell's expression profile<sup>[14](https://www.nature.com/articles/ncomms15599)</sup>, with higher entropy corresponding to greater diversity. Thus, we have once again confirmed that cluster 3 corresponds to the most undifferentiated state.
+
+
+```{r find root, echo=FALSE, message=FALSE, warning=FALSE}
+entropy <- perCellEntropy(sce_new)
+
+ent.data <- data.frame(cluster=sce_new$seurat_clusters,
+                       source=sce_new$source,
+                       entropy=entropy)
+ggplot(ent.data, aes(x=cluster, y=entropy)) + 
+  geom_violin(aes(fill = cluster)) +
+  stat_summary(fun=median, geom="point") +
+  scale_fill_manual(values = my_colors) +
+  plot_theme
+```
+
+For each trajectory, genes were found that distinguish it from others. As mentioned above, TAGLN is a canonical smooth muscle cell marker that stimulates angiogenesis.<sup>[3](https://journals.biologists.com/jcs/article/134/15/jcs254920/271140/The-canonical-smooth-muscle-cell-marker-TAGLN-is)</sup> In trajectory 2, the SAA1 gene, which is an amyloid, is enriched. In trajectory 3, there is an increased expression of the gene TANC2, which, as shown in a recent article, is necessary for the myoblasts fusion.<sup>[15](https://europepmc.org/article/ppr/ppr553843)</sup> This explains why there is an increased expression of many adhesion genes in these clusters. 
+
+
+```{r trajectory genes, fig.height=5, fig.width=20, echo=FALSE, message=FALSE, warning=FALSE}
+p1 <- plotGeneCount(sce_new, gene = 'TAGLN') +
+  scale_color_gradient(low = "#6495EDFF", high = "#FF69B4FF") 
+
+p2 <- plotGeneCount(sce_new, gene = 'SAA1') +
+  scale_color_gradient(low = "#6495EDFF", high = "#FF69B4FF") 
+
+p3 <- plotGeneCount(sce_new, gene = 'TANC2') +
+  scale_color_gradient(low = "#6495EDFF", high = "#FF69B4FF")
+
+cowplot::plot_grid(p1, p2, p3, 
+          nrow=1)
+```
+
+## DE in one cluster
+
+In each cluster, the differential expression between sources within the same cluster was analyzed. Here are the most interesting genes, the expression of which differs significantly between sources within the same cluster.
+
+A gene TWIST2 that inhibits myoblast differentiation was found in cluster 0.<sup>[16](https://pubmed.ncbi.nlm.nih.gov/37115930/)</sup> Its expression is higher in cells without the addition of placenta. In the first cluster, the expression of the CHI3L1 gene<sup>[11](https://pubmed.ncbi.nlm.nih.gov/24512683/)</sup>, which is expressed during inflammation in muscles, is significantly higher in cells grown without a placenta. This may indicate that placenta supplementation reduces inflammatory processes.  In cluster 3, defined by us as dividing cells, the genes IFITM2-3 have increased expression in cells grown without the addition of placenta. IFITM2-3 – has increased expression during myogenesis.<sup>[17](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10468414/)</sup> This positively correlated with the expression of differentiation factors MyoD, myogenin, Mrf5, and desmin. This fact, as well as the large number of cells grown with placenta in this cluster, may indicate an enhanced pluripotent status of pla+ cells. A2M expression is increased in cluster 4 in pla- cells probably the addition of placenta improves angiogenesis processes, since it is known that overexpression of A2M reduced the expression of genes associated with angiogenesis.<sup>[18](https://pubmed.ncbi.nlm.nih.gov/36894970/)</sup> The calpain/calpastatin system is involved in numerous membrane fusion events, such as neural vesicle exocytosis and platelet and red-cell aggregation.
+
+
+
+```{r echo=FALSE, fig.height=6, fig.width=9, message=FALSE, warning=FALSE}
+myoblasts$cluster_source <- paste(myoblasts$seurat_clusters, myoblasts$source, sep = "_")
+Idents(myoblasts) <- "cluster_source"
+# mono.de0 <- FindMarkers(myoblasts, 
+#                        ident.1 = "0_Pl.My.Pr.Hu.1", 
+#                        ident.2 = "0_My.Pr.Hu.1", 
+#                        #only.pos = TRUE, 
+#                        min.pct = 0.4,  
+#                        min.diff.pct = 0.1, logfc.threshold = 0.25,
+#                        verbose = FALSE)
+# 
+# feat <- mono.de0 %>% 
+#   dplyr::filter(p_val_adj < 0.05) %>% 
+#   head(n = 10, wt = avg_log2FC) %>% 
+#   row.names()
+p1 <- VlnPlot(myoblasts, features = 'TWIST2', idents = c("0_Pl.My.Pr.Hu.1", "0_My.Pr.Hu.1"),
+        group.by = "cluster_source", cols = my_colors) +
+  plot_theme +
+  theme(axis.title.x = element_blank(), 
+        axis.text.x = element_text(angle = 45, hjust=1)) +
+  NoLegend()
+
+p2 <- VlnPlot(myoblasts, features = c('CHI3L1'), idents = c("1_Pl.My.Pr.Hu.1", "1_My.Pr.Hu.1"),
+        group.by = "cluster_source", cols = my_colors) & 
+  plot_theme +
+  theme(axis.title.x = element_blank(), 
+        axis.text.x = element_text(angle = 45, hjust=1)) +
+  NoLegend()
+
+p3 <- VlnPlot(myoblasts, features = c("IFITM2"), idents = c("3_Pl.My.Pr.Hu.1", "3_My.Pr.Hu.1"),
+        group.by = "cluster_source", cols = my_colors) & 
+  plot_theme +
+  theme(axis.title.x = element_blank(), 
+        axis.text.x = element_text(angle = 45, hjust=1)) +
+  NoLegend()
+p3.1 <- VlnPlot(myoblasts, features = c("IFITM3"), idents = c("3_Pl.My.Pr.Hu.1", "3_My.Pr.Hu.1"),
+        group.by = "cluster_source", cols = my_colors) & 
+  plot_theme +
+  theme(axis.title.x = element_blank(), 
+        axis.text.x = element_text(angle = 45, hjust=1)) +
+  NoLegend()
+p4 <- VlnPlot(myoblasts, features = c("A2M"), idents = c("4_Pl.My.Pr.Hu.1", "4_My.Pr.Hu.1"),
+        group.by = "cluster_source", cols = my_colors) & 
+  plot_theme +
+  theme(axis.title.x = element_blank(), 
+        axis.text.x = element_text(angle = 45, hjust=1)) +
+  NoLegend()
+p5 <- VlnPlot(myoblasts, features = c("CAST"), idents = c("6_Pl.My.Pr.Hu.1", "6_My.Pr.Hu.1"),
+        group.by = "cluster_source", cols = my_colors) & 
+  plot_theme +
+  theme(axis.title.x = element_blank(), 
+        axis.text.x = element_text(angle = 45, hjust=1)) +
+  NoLegend()
+cowplot::plot_grid(p1, p2, p3, p4, p5, nrow = 2)
+```
+
+```{r fig.height=12, fig.width=8}
+mono.de0 <- FindMarkers(myoblasts,
+                       ident.1 = "0_Pl.My.Pr.Hu.1",
+                       ident.2 = "0_My.Pr.Hu.1",
+                       #only.pos = TRUE,
+                       min.pct = 0.4,
+                       min.diff.pct = 0.1,
+                       logfc.threshold = 0.25,
+                       verbose = FALSE)
+
+feat <- mono.de0 %>%
+  dplyr::filter(p_val_adj < 0.05) %>%
+  head(n = 10, wt = avg_log2FC) %>%
+  row.names()
+
+VlnPlot(myoblasts, features = feat, idents = c("0_Pl.My.Pr.Hu.1", "0_My.Pr.Hu.1"),
+        group.by = "cluster_source") 
+```
+
+
+```{r fig.height=10, fig.width=8}
+ mono.de1 <- FindMarkers(myoblasts,
+                        ident.1 = "1_Pl.My.Pr.Hu.1",
+                        ident.2 = "1_My.Pr.Hu.1",
+                        #only.pos = TRUE,
+                        min.pct = 0.4,
+                        min.diff.pct = 0.1,
+                        logfc.threshold = 0.25,
+                        verbose = FALSE)
+
+ feat <- mono.de1 %>%
+   dplyr::filter(p_val_adj < 0.05) %>%
+   head(n = 10, wt = avg_log2FC) %>%
+   row.names()
+
+VlnPlot(myoblasts, features = feat, idents = c("1_Pl.My.Pr.Hu.1", "1_My.Pr.Hu.1"),
+        group.by = "cluster_source") 
+```
+
+```{r eval=FALSE, include=FALSE}
+mono.de2 <- FindMarkers(myoblasts, 
+                       ident.1 = "2_Pl.My.Pr.Hu.1", 
+                       ident.2 = "2_My.Pr.Hu.1", 
+                       #only.pos = TRUE, 
+                       min.pct = 0.4,  
+                       min.diff.pct = 0.1, logfc.threshold = 0.25,
+                       verbose = FALSE)
+
+feat <- mono.de2 %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  head(n = 10, wt = avg_log2FC) %>% 
+  row.names()
+VlnPlot(myoblasts, features = feat, idents = c("2_Pl.My.Pr.Hu.1", "2_My.Pr.Hu.1"),
+        group.by = "cluster_source") 
+ggsave(paste0(PLOTSDIR, 'deg2.png'), width=10, height=12)
+```
+
+```{r}
+mono.de3 <- FindMarkers(myoblasts, 
+                       ident.1 = "3_Pl.My.Pr.Hu.1", 
+                       ident.2 = "3_My.Pr.Hu.1", 
+                       #only.pos = TRUE, 
+                       min.pct = 0.4,  
+                       min.diff.pct = 0.1, 
+                       logfc.threshold = 0.1,
+                       verbose = FALSE)
+
+feat <- mono.de3 %>% 
+  dplyr::filter(p_val_adj < 0.05) %>% 
+  head(n = 10, wt = avg_log2FC) %>% 
+  row.names()
+VlnPlot(myoblasts, features = feat, idents = c("3_Pl.My.Pr.Hu.1", "3_My.Pr.Hu.1"),
+        group.by = "cluster_source") 
+
+```
+
+## Conclusion
+
+Myoblast cells were clustered, resulting in 10 clusters. Clusters were analyzed using DE, GSEA and pseudo time analysis. 
+
+Pseudo-time analysis demonstrates the presence of 3 division trajectories from a single cluster of 3. One division trajectory leads to cells with active angiogenesis, the second to cells with cell adhesion (myoblast fusion) enrichment, and the third trajectory is probably damaged cells.
+
+Apparently, based on GSEA only cluster 3 is pluripotent. Then 27.2% of tri+pla cells are still pluripotent, have not differentiated to one of three options, while only 5.01% of tri cells are in this position. We can say that the addition of placenta during cell growth enhances the pluripotent status of cells, as well as the number of pluripotent cells. A decrease in inflammatory processes in pla- cells was also noted. Moreover, pla+ cells show increased angiogenesis activity.
+
+
+```{r evaluateK, eval=FALSE, include=FALSE}
+BPPARAM <- BiocParallel::bpparam()
+BPPARAM$workers <- CPU
+
+dimred <- myoblasts@reductions$umap@cell.embeddings
+clustering <- myoblasts$seurat_clusters
+counts <- as.matrix(myoblasts[["RNA"]]$counts)
+
+lineages <- getLineages(data = dimred, clusterLabels = clustering, start.clus = '3', dist.method = 'mnn')
+curves <- getCurves(lineages)
+
+icMat <- evaluateK(counts = sce_new, k = 3:13, 
+                   nGenes = 500, verbose = T, parallel = FALSE)
+```
+
+
+```{r fitgam, eval=FALSE, include=FALSE}
+hvg_genes <- getTopHVGs(sce_new, n=1000)
+
+sce_gam <- fitGAM(counts = sce_new, nknots = 9, verbose = FALSE, 
+                  genes = rownames(sce_new)[rownames(sce_new) %in% hvg_genes], parallel = FALSE)
+
+assoRes <- associationTest(sce_gam, lineages = TRUE)
+# BPPARAM = BPPARAM, parallel = TRUE
+```
+
+```{r eval=FALSE, include=FALSE}
+sce_gam <- readRDS(paste0(WORKDIR, 'sce_gam.rds'))
+startRes <- startVsEndTest(sce_gam, lineages = TRUE)
+oStart <- order(startRes$waldStat, decreasing = TRUE)
+sigGeneStart <- names(sce_gam)[oStart[1]]
+plotSmoothers(sce_gam, counts, gene = sigGeneStart)
+plotGeneCount(sce_new, gene = sigGeneStart) +
+  scale_color_gradient(low = "#6495EDFF", high = "#FF69B4FF")
+```
+
+```{r eval=FALSE, include=FALSE}
+endRes <- diffEndTest(sce_gam)
+o <- order(endRes$waldStat, decreasing = TRUE)
+sigGene <- names(sce_gam)[o[3]]
+plotGeneCount(sce_new, gene = sigGene) +
+  scale_color_gradient(low = "#6495EDFF", high = "#FF69B4FF")
+
+gene_list <- names(sce_gam)[o[30:60]]
+
+# Create a list of plots
+plots_list <- lapply(gene_list, function(gene) {
+  plotGeneCount(sce_new, gene = gene) +
+    scale_color_gradient(low = "#6495EDFF", high = "#FF69B4FF")
+})
+
+# Print or display the plots
+for (plot in plots_list) {
+  print(plot)
+}
+```
+
+```{r eval=FALSE, include=FALSE}
+patternRes <- patternTest(sce_gam)
+oPat <- order(patternRes$waldStat, decreasing = TRUE)
+
+plotGeneCount(sce_gam, gene = rownames(patternRes)[oPat][1])
+
+gene_list <- names(sce_gam)[oPat[31:60]]
+
+# Create a list of plots
+plots_list <- lapply(gene_list, function(gene) {
+  plotGeneCount(sce_new, gene = gene) +
+    scale_color_gradient(low = "#6495EDFF", high = "#FF69B4FF")
+})
+
+# Print or display the plots
+for (plot in plots_list) {
+  print(plot)
+}
+```
+
+
+
+# Pseudotime by samples
+```{r slingshot, echo=FALSE, fig.height=5, fig.width=15, message=FALSE, warning=FALSE}
+sce_pl <- as.SingleCellExperiment(subset(myoblasts, subset = source == 'Pl.My.Pr.Hu.1'))
+
+colData(sce_pl)$seurat_clusters <- as.character(subset(myoblasts, subset = source == 'Pl.My.Pr.Hu.1')$seurat_clusters)  # go from factor to character
+sce_pl <- slingshot(sce_pl, clusterLabels = 'seurat_clusters', reducedDim = 'UMAP', 
+                     start.clus = '3', dist.method = 'mnn', #end.clus = c('2', '4', '9'), 
+                     #reweight = FALSE
+                     )
+
+# Plot PC1 vs PC2 colored by Slingshot pseudotime.
+plot_data <- as.data.frame(reducedDims(sce_pl)$UMAP) %>% 
+  cbind(pseudotime1 = sce_pl$slingPseudotime_1,
+        pseudotime2 = sce_pl$slingPseudotime_2,
+        pseudotime3 = sce_pl$slingPseudotime_3)
+
+# Extract Slingshot trajectory information
+slingshot_data1 <- as.data.frame(SlingshotDataSet(sce_pl)@curves$Lineage1$s) 
+slingshot_data2 <- as.data.frame(SlingshotDataSet(sce_pl)@curves$Lineage2$s) 
+slingshot_data3 <- as.data.frame(SlingshotDataSet(sce_pl)@curves$Lineage3$s) 
+
+p1 <- ggplot(data=plot_data, aes(x = umap_1, y = umap_2)) +
+  geom_point(aes(color = pseudotime1), shape = 16) +
+  scale_color_gradient(low = "#6495EDFF", high = "#FF69B4FF", limits=c(0,18)) +
+  coord_fixed() +
+  labs(title = "Pseudotime 1") +
+  geom_path(data = slingshot_data1, aes(x = umap_1, y = umap_2), size = 2) +
+  theme_classic() +
+  labs(colour="pseudotime")
+  
+
+p2 <- ggplot(data=plot_data, aes(x = umap_1, y = umap_2)) +
+  geom_point(aes(color = pseudotime2), shape = 16) +
+  scale_color_gradient(low = "#6495EDFF", high = "#FF69B4FF", limits=c(0,18)) +
+  coord_fixed() +
+  labs(title = "Pseudotime 2") +
+  geom_path(data = slingshot_data2, aes(x = umap_1, y = umap_2), size = 2) +
+  theme_classic() +
+  labs(colour="pseudotime")
+
+p3 <- ggplot(data=plot_data, aes(x = umap_1, y = umap_2)) +
+  geom_point(aes(color = pseudotime3), shape = 16) +
+  scale_color_gradient(low = "#6495EDFF", high = "#FF69B4FF", limits=c(0,18)) +
+  coord_fixed() +
+  labs(title = "Pseudotime 3") +
+  geom_path(data = slingshot_data3, aes(x = umap_1, y = umap_2), size = 2) +
+  theme_classic() +
+  labs(colour="pseudotime")
+
+pl_plot <- cowplot::plot_grid(p1, p2, p3, 
+          #labels = c('My.Pr.Hu.1', 'Pl.My.Pr.Hu.1'),
+          nrow=1)
+
+```
+
+```{r slingshot, echo=FALSE, fig.height=11, fig.width=15, message=FALSE, warning=FALSE}
+sce_nonpl <- as.SingleCellExperiment(subset(myoblasts, subset = source == 'My.Pr.Hu.1'))
+
+colData(sce_nonpl)$seurat_clusters <- as.character(subset(myoblasts, subset = source == 'My.Pr.Hu.1')$seurat_clusters)  # go from factor to character
+sce_nonpl <- slingshot(sce_nonpl, clusterLabels = 'seurat_clusters', reducedDim = 'UMAP', 
+                     start.clus = '3', dist.method = 'mnn', #end.clus = c('2', '4', '9'), 
+                     #reweight = FALSE
+                     )
+
+# Plot PC1 vs PC2 colored by Slingshot pseudotime.
+plot_data <- as.data.frame(reducedDims(sce_nonpl)$UMAP) %>% 
+  cbind(pseudotime1 = sce_nonpl$slingPseudotime_1,
+        pseudotime2 = sce_nonpl$slingPseudotime_2,
+        pseudotime3 = sce_nonpl$slingPseudotime_3)
+
+# Extract Slingshot trajectory information
+slingshot_data1 <- as.data.frame(SlingshotDataSet(sce_nonpl)@curves$Lineage1$s) 
+slingshot_data2 <- as.data.frame(SlingshotDataSet(sce_nonpl)@curves$Lineage2$s) 
+slingshot_data3 <- as.data.frame(SlingshotDataSet(sce_nonpl)@curves$Lineage3$s) 
+
+p1 <- ggplot(data=plot_data, aes(x = umap_1, y = umap_2)) +
+  geom_point(aes(color = pseudotime1), shape = 16) +
+  scale_color_gradient(low = "#6495EDFF", high = "#FF69B4FF", limits=c(0,18)) +
+  coord_fixed() +
+  labs(title = "Pseudotime 1") +
+  geom_path(data = slingshot_data1, aes(x = umap_1, y = umap_2), size = 2) +
+  theme_classic() +
+  labs(colour="pseudotime")
+  
+
+p2 <- ggplot(data=plot_data, aes(x = umap_1, y = umap_2)) +
+  geom_point(aes(color = pseudotime2), shape = 16) +
+  scale_color_gradient(low = "#6495EDFF", high = "#FF69B4FF", limits=c(0,18)) +
+  coord_fixed() +
+  labs(title = "Pseudotime 2") +
+  geom_path(data = slingshot_data2, aes(x = umap_1, y = umap_2), size = 2) +
+  theme_classic() +
+  labs(colour="pseudotime")
+
+p3 <- ggplot(data=plot_data, aes(x = umap_1, y = umap_2)) +
+  geom_point(aes(color = pseudotime3), shape = 16) +
+  scale_color_gradient(low = "#6495EDFF", high = "#FF69B4FF", limits=c(0,18)) +
+  coord_fixed() +
+  labs(title = "Pseudotime 3") +
+  geom_path(data = slingshot_data3, aes(x = umap_1, y = umap_2), size = 2) +
+  theme_classic() +
+  labs(colour="pseudotime")
+
+
+nonpl_plot <- cowplot::plot_grid(p1, p2, p3, 
+          #labels = c('My.Pr.Hu.1', 'Pl.My.Pr.Hu.1'),
+          nrow=1)
+
+cowplot::plot_grid(nonpl_plot, pl_plot, 
+          labels = c('My.Pr.Hu.1', 'Pl.My.Pr.Hu.1'),
+          hjust = 0, label_x = 0.01, label_y = 1,
+          label_size = 20, label_fontfamily = 'Helvetica', nrow=2)
+```
+
+# Features plot
+```{r fig.height=30, fig.width=16}
+FeaturePlot(myoblasts, c('DES', 'MYOD1', 'MYH1', 'MYH2', 'MYH3', 'MYH4', 'MYH16', 'MYH6', 'MYH7', 'MYH7B', "MYH8", 'MYH9', 'MYH10', 'MYH11', 'MYH12', 'MYH13', 'MYH14', 'MYH15', 'MYO1A', "MYO1B", "MYO1C", "MYO1D", "MYO1E", "MYO1F", "MYO1G", "MYO1H", "MYO3A", "MYO3B", "MYO9A", "MYO9B", 'MYO5A', "MYO5B", "MYO5C", 'MYO6', 'MYO7A', "MYO7B", 'MYO10', "MYO19", 'MYO15A', "MYO15B", 'MYO16', 'MYO18A', "MYO18B"))
+ggsave(paste0(PLOTSDIR, 'markers.png'), width=16, height=30)
+```
+
+```{r}
+FeaturePlot(myoblasts, c('ACTA2', 'DES', '))
+```
+
+# Entropy by samples
+```{r find root, echo=FALSE, message=FALSE, warning=FALSE}
+entropy <- perCellEntropy(sce_new)
+sce_new$cluster_source <- paste(sce_new$seurat_clusters, sce_new$source, sep = "_")
+ent.data <- data.frame(cluster=sce_new$seurat_clusters,
+                       source=sce_new$source,
+                       entropy=entropy)
+ggplot(ent.data, aes(x=cluster, y=entropy)) + 
+  geom_violin(aes(fill = cluster)) +
+  stat_summary(fun=median, geom="point") +
+  scale_fill_manual(values = c(my_colors, 'blue', 'pink', 'lightgreen', 'orange')) +
+  plot_theme +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  NoLegend()
+```
+
+```{r fig.height=4, fig.width=12}
+wilcox_result <- lapply(split(ent.data, ent.data$cluster), function(x) wilcox.test(entropy ~ source, data = x)$p.value) %>% 
+  unlist()
+wilcox_result <- data.frame(cluster = seq(0, 9, 1),
+                        p_val = wilcox_result,
+                        group1 = rep('My.Pr.Hu.1', 10),
+                        group2 = rep('Pl.My.Pr.Hu.1', 10)) %>% 
+  add_significance("p_val") %>% 
+  add_xy_position(data = ., x = "cluster", dodge = 0.8)
+
+
+t_test_results <- ent.data %>%
+     group_by(cluster) %>%
+     t_test(entropy ~ source) %>%
+     adjust_pvalue(method = "bonferroni") %>%
+     add_significance("p.adj") %>% 
+  add_xy_position(x = "cluster", dodge = 0.8)
+# Draw box plot for each cluster
+ggplot(ent.data, aes(x = cluster, y = entropy)) +
+  geom_boxplot(aes(fill = source)) +
+    scale_fill_manual(values = my_colors) +
+    theme_minimal() +
+  #facet_wrap(~cluster, scale="free") +
+  stat_pvalue_manual(t_test_results,  label = "p", tip.length = 0)
+  labs(title = "Boxplot of Entropy by Cluster and Source",
+       x = "Cluster",
+       y = "Entropy") 
+```
+
